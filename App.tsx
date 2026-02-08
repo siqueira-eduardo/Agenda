@@ -4,21 +4,13 @@ import {
   CheckSquare, Sparkles, ChevronLeft, ChevronRight, 
   Trash2, Send, Calendar, Target, BookOpen, Users, 
   LayoutDashboard, Heart, Cross, Briefcase, 
-  Wallet, GraduationCap, Clock, Award, Flame, UserPlus, 
-  ShieldCheck, ListChecks, Info, Gavel, Edit3, X, Plus, Save, Camera, UserCircle, Cake
+  Wallet, GraduationCap, Clock, Flame, UserPlus, 
+  ShieldCheck, ListChecks, Gavel, Edit3, X, Save, Camera, 
+  LogIn, UserCircle2, Key, Hash, Shield, ArrowRight, LogOut, Copy, Check, Volume2, Info, AlertCircle, Plus, CloudCheck, Settings, UsersRound, Trophy, ScrollText, UserCog, History, Filter, LayoutGrid, List, Repeat, 
+  Zap, PieChart, BarChart3, ChevronDown, Medal, Star, Crown
 } from 'lucide-react';
-import { Task, ViewMode, AIChatMessage, PillarType, Profile, Goal, StudyEntry, FamilyRule, FamilyResponsibility } from './types';
-import { getAIResponse, parseSmartTask } from './services/geminiService';
-
-const PILLAR_ICONS: Record<PillarType, React.ReactNode> = {
-  'Espiritual': <Cross size={18} />,
-  'Estudos': <GraduationCap size={18} />,
-  'Trabalho': <Briefcase size={18} />,
-  'Saúde': <Heart size={18} />,
-  'Intelectual': <BookOpen size={18} />,
-  'Financeiro': <Wallet size={18} />,
-  'Família': <Users size={18} />
-};
+import { Task, ViewMode, AIChatMessage, PillarType, Profile, Goal, StudyEntry, FamilyRule, Family, ProfileRole, RecurrenceType, PriorityType, Milestone } from './types';
+import { getAIResponse, parseSmartTask, generateSpeech } from './services/geminiService';
 
 const PILLAR_COLORS: Record<PillarType, string> = {
   'Espiritual': 'bg-purple-100 text-purple-700',
@@ -30,758 +22,1279 @@ const PILLAR_COLORS: Record<PillarType, string> = {
   'Família': 'bg-rose-100 text-rose-700'
 };
 
-const DEFAULT_FAMILY_ID = 'legado-family-001';
+const PILLAR_BG: Record<PillarType, string> = {
+  'Espiritual': 'bg-purple-500',
+  'Estudos': 'bg-blue-500',
+  'Trabalho': 'bg-slate-500',
+  'Saúde': 'bg-emerald-500',
+  'Intelectual': 'bg-indigo-500',
+  'Financeiro': 'bg-amber-500',
+  'Família': 'bg-rose-500'
+};
+
+const PRIORITY_COLORS: Record<PriorityType, string> = {
+  'Alta': 'border-red-500 bg-red-50 text-red-700',
+  'Média': 'border-amber-500 bg-amber-50 text-amber-700',
+  'Baixa': 'border-slate-200 bg-white text-slate-600'
+};
+
+const PILLAR_OPTIONS: PillarType[] = ['Espiritual', 'Estudos', 'Trabalho', 'Saúde', 'Intelectual', 'Financeiro', 'Família'];
+const RECURRENCE_OPTIONS: RecurrenceType[] = ['Diário', 'Semanal', 'Mensal', 'Anual'];
+const PRIORITY_OPTIONS: PriorityType[] = ['Alta', 'Média', 'Baixa'];
+
+// XP Logic
+const LEVEL_THRESHOLDS = [0, 100, 250, 500, 1000, 2000, 4000, 8000, 15000, 30000];
+const getLevel = (xp: number) => LEVEL_THRESHOLDS.findIndex(t => xp < t) === -1 ? LEVEL_THRESHOLDS.length : LEVEL_THRESHOLDS.findIndex(t => xp < t);
+const getNextLevelXp = (xp: number) => {
+  const level = getLevel(xp);
+  return LEVEL_THRESHOLDS[level] || 1000000;
+};
+
+// Helper para data local segura (evita bugs de timezone)
+const formatDateLocal = (date: Date) => {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+const checkRecurrenceMatch = (baseDateStr: string, targetDateStr: string, recurrence: RecurrenceType) => {
+  if (targetDateStr <= baseDateStr) return false;
+  
+  // Usar UTC para cálculo de diferença de dias para evitar problemas com horário de verão (DST)
+  const b = new Date(baseDateStr);
+  const t = new Date(targetDateStr);
+  const utc1 = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+  const utc2 = Date.UTC(t.getFullYear(), t.getMonth(), t.getDate());
+  
+  const diffDays = Math.floor((utc2 - utc1) / (1000 * 60 * 60 * 24));
+  
+  if (recurrence === 'Diário') return true;
+  if (recurrence === 'Semanal') return diffDays % 7 === 0;
+  if (recurrence === 'Mensal') {
+      const bLocal = new Date(baseDateStr + 'T00:00:00');
+      const tLocal = new Date(targetDateStr + 'T00:00:00');
+      return bLocal.getDate() === tLocal.getDate();
+  }
+  if (recurrence === 'Anual') {
+      const bLocal = new Date(baseDateStr + 'T00:00:00');
+      const tLocal = new Date(targetDateStr + 'T00:00:00');
+      return bLocal.getDate() === tLocal.getDate() && bLocal.getMonth() === tLocal.getMonth();
+  }
+  return false;
+};
 
 const App: React.FC = () => {
-  // Profiles state
-  const [profiles, setProfiles] = useState<Profile[]>(() => {
-    const saved = localStorage.getItem('legado_profiles');
-    return saved ? JSON.parse(saved) : [{ 
-      id: 'eduardo', 
-      name: 'Eduardo Siqueira', 
-      role: 'Pai', 
-      familyId: DEFAULT_FAMILY_ID,
-      bio: 'Focado em disciplina e construção de um futuro sólido.',
-      avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop'
-    }];
+  // --- Auth & Data States ---
+  const [families, setFamilies] = useState<Family[]>(() => {
+    const saved = JSON.parse(localStorage.getItem('legado_all_families') || '[]');
+    return saved.length > 0 ? saved : [{ id: 'fam-demo', name: 'Legado Alpha', uniqueCode: 'LEG-1234' }];
   });
-  const [activeProfileId, setActiveProfileId] = useState<string>(profiles[0].id);
-  const activeProfile = profiles.find(p => p.id === activeProfileId)!;
+  
+  const [allProfiles, setAllProfiles] = useState<Profile[]>(() => {
+    const profiles = JSON.parse(localStorage.getItem('legado_all_profiles') || '[]');
+    return profiles.map((p: any) => ({ ...p, xp: p.xp || 0, level: p.level || 1 }));
+  });
 
-  // View state
+  const [currentUser, setCurrentUser] = useState<Profile | null>(() => {
+    const saved = localStorage.getItem('legado_current_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+  
+  // UI Flow States
+  const [authMode, setAuthMode] = useState<'login' | 'signup' | 'family-choice'>('login');
+  const [familyAction, setFamilyAction] = useState<'none' | 'create' | 'join'>('none');
   const [view, setView] = useState<ViewMode>(ViewMode.DASHBOARD);
-  const [familySubView, setFamilySubView] = useState<'members' | 'rules' | 'duties'>('members');
-  const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [familySubView, setFamilySubView] = useState<'members' | 'rules' | 'ranking'>('ranking');
+  
+  // Agenda Specific States
+  const [agendaType, setAgendaType] = useState<'daily' | 'monthly'>('daily');
+  const [calendarDate, setCalendarDate] = useState(new Date()); 
+  const [selectedMemberId, setSelectedMemberId] = useState<string>(''); 
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'Estudos' | 'Trabalho' | 'Família'>('all');
+
+  // Task Management States
+  const [showTaskModal, setShowTaskModal] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    date: '',
+    time: '',
+    pillar: 'Estudos' as PillarType,
+    assignee: '',
+    recurrence: undefined as RecurrenceType | undefined,
+    priority: 'Média' as PriorityType
+  });
+
+  // Goal Management States
+  const [showGoalModal, setShowGoalModal] = useState(false);
+  const [goalForm, setGoalForm] = useState({
+      title: '',
+      pillar: 'Intelectual' as PillarType,
+      type: 'Curto' as 'Curto' | 'Médio' | 'Longo'
+  });
+
+  // Functional States
+  const [selectedDate, setSelectedDate] = useState<string>(formatDateLocal(new Date()));
   const [inputText, setInputText] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
-
-  // Modal State
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
-
-  // Data state
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState<string | null>(null);
+  const [filterOverdue, setFilterOverdue] = useState(false);
+  const [notification, setNotification] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+  
+  // Data States
   const [tasks, setTasks] = useState<Task[]>(() => JSON.parse(localStorage.getItem('legado_tasks') || '[]'));
   const [goals, setGoals] = useState<Goal[]>(() => JSON.parse(localStorage.getItem('legado_goals') || '[]'));
-  const [studies, setStudies] = useState<StudyEntry[]>(() => JSON.parse(localStorage.getItem('legado_studies') || '[]'));
+  const [rules, setRules] = useState<FamilyRule[]>(() => JSON.parse(localStorage.getItem('legado_rules') || '[]'));
   const [aiChat, setAiChat] = useState<AIChatMessage[]>([]);
-  
-  const [rules, setRules] = useState<FamilyRule[]>(() => {
-    const saved = localStorage.getItem('legado_rules');
-    return saved ? JSON.parse(saved) : [
-      { id: '1', title: 'Ordem à Mesa', description: 'Sem aparelhos eletrônicos durante as refeições.', icon: '🍽️' },
-      { id: '2', title: 'Prioridade Espiritual', description: 'Oração individual ao acordar e familiar no domingo.', icon: '🙏' },
-      { id: '3', title: 'Verdade Absoluta', description: 'A honestidade é a base de toda confiança nesta casa.', icon: '⚖️' }
-    ];
-  });
 
-  const [responsibilities, setResponsibilities] = useState<FamilyResponsibility[]>(() => {
-    const saved = localStorage.getItem('legado_responsibilities');
-    return saved ? JSON.parse(saved) : [
-      { id: '1', title: 'Lixo e Organização Externa', frequency: 'Diária', assignedProfileId: 'eduardo' },
-      { id: '2', title: 'Planejamento Financeiro Semanal', frequency: 'Semanal', assignedProfileId: 'eduardo' }
-    ];
-  });
+  // Feedback States
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   // Persistence
   useEffect(() => {
-    localStorage.setItem('legado_profiles', JSON.stringify(profiles));
+    setIsSyncing(true);
+    localStorage.setItem('legado_all_families', JSON.stringify(families));
+    localStorage.setItem('legado_all_profiles', JSON.stringify(allProfiles));
+    localStorage.setItem('legado_current_user', JSON.stringify(currentUser));
     localStorage.setItem('legado_tasks', JSON.stringify(tasks));
     localStorage.setItem('legado_goals', JSON.stringify(goals));
-    localStorage.setItem('legado_studies', JSON.stringify(studies));
     localStorage.setItem('legado_rules', JSON.stringify(rules));
-    localStorage.setItem('legado_responsibilities', JSON.stringify(responsibilities));
-  }, [profiles, tasks, goals, studies, rules, responsibilities]);
+    const timer = setTimeout(() => setIsSyncing(false), 800);
+    return () => clearTimeout(timer);
+  }, [families, allProfiles, currentUser, tasks, goals, rules]);
 
-  // Derived calculations
-  const dailyTasks = useMemo(() => tasks.filter(t => (t.profileId === activeProfileId || t.isFamilyTask) && t.date === selectedDate), [tasks, activeProfileId, selectedDate]);
-  const activeGoals = useMemo(() => goals.filter(g => g.profileId === activeProfileId), [goals, activeProfileId]);
-  const dailyStudyHours = useMemo(() => studies.filter(s => s.profileId === activeProfileId && s.date === selectedDate).reduce((sum, s) => sum + s.hours, 0), [studies, activeProfileId, selectedDate]);
+  useEffect(() => {
+    if (notification) {
+      const t = setTimeout(() => setNotification(null), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [notification]);
 
-  // Handlers
+  useEffect(() => {
+    if (currentUser && !selectedMemberId) setSelectedMemberId(currentUser.id);
+  }, [currentUser]);
+
+  const activeFamily = useMemo(() => families.find(f => f.id === currentUser?.familyId), [families, currentUser]);
+  const todayStr = useMemo(() => formatDateLocal(new Date()), []);
+  const familyMembers = useMemo(() => allProfiles.filter(p => p.familyId === currentUser?.familyId), [allProfiles, currentUser]);
+
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ msg, type });
+  };
+
+  const getFilteredTasks = (dateStr: string, memberId: string) => {
+    const familyMemberIds = new Set(familyMembers.map(m => m.id));
+
+    // 1. Real tasks for this date
+    let realTasks = tasks.filter(t => {
+      if (!familyMemberIds.has(t.profileId)) return false;
+      if (t.date !== dateStr) return false;
+      return t.profileId === memberId || t.isFamilyTask;
+    });
+
+    // 2. Virtual projected tasks
+    let virtualTasks = tasks.filter(t => {
+      if (!familyMemberIds.has(t.profileId)) return false;
+      if (t.completed) return false;
+      if (!t.recurrence) return false;
+      if (t.date >= dateStr) return false;
+      
+      const isOwner = t.profileId === memberId || t.isFamilyTask;
+      if (!isOwner) return false;
+
+      return checkRecurrenceMatch(t.date, dateStr, t.recurrence);
+    }).map(t => ({
+      ...t,
+      id: `virtual-${t.id}-${dateStr}`,
+      date: dateStr,
+      isVirtual: true,
+    }));
+    
+    const memberProfile = allProfiles.find(p => p.id === memberId);
+    let allTasks = [...realTasks, ...virtualTasks];
+
+    if (memberProfile?.role === 'Outro' && currentUser?.id !== memberId) {
+      allTasks = allTasks.filter(t => t.pillar === 'Família' || t.pillar === 'Saúde');
+    }
+
+    if (categoryFilter !== 'all') {
+      allTasks = allTasks.filter(t => t.pillar === categoryFilter);
+    }
+    
+    return allTasks.sort((a, b) => {
+      const prioMap = { 'Alta': 0, 'Média': 1, 'Baixa': 2 };
+      if (prioMap[a.priority] !== prioMap[b.priority]) return prioMap[a.priority] - prioMap[b.priority];
+      if (a.time && b.time) return a.time.localeCompare(b.time);
+      return 0;
+    });
+  };
+
+  const visibleTasks = useMemo(() => {
+    if (filterOverdue) {
+      const familyMemberIds = new Set(familyMembers.map(m => m.id));
+      return tasks.filter(t => {
+        if (!familyMemberIds.has(t.profileId)) return false;
+        return (t.profileId === selectedMemberId || t.isFamilyTask) && !t.completed && t.date < todayStr;
+      });
+    }
+    return getFilteredTasks(selectedDate, selectedMemberId);
+  }, [filterOverdue, tasks, selectedMemberId, selectedDate, todayStr, categoryFilter, allProfiles, familyMembers]);
+
+  const activeGoals = useMemo(() => goals.filter(g => g.profileId === currentUser?.id), [goals, currentUser]);
+  const familyRules = useMemo(() => rules.filter(r => r.familyId === currentUser?.familyId), [rules, currentUser]);
+
+  const dashboardData = useMemo(() => {
+    if (!currentUser) return null;
+    const todayTasks = getFilteredTasks(todayStr, currentUser.id);
+    const total = todayTasks.length;
+    const completed = todayTasks.filter(t => t.completed).length;
+    const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
+    
+    const nextTask = todayTasks.find(t => !t.completed); 
+    const pillarCounts: Record<string, number> = {};
+    todayTasks.forEach(t => { pillarCounts[t.pillar] = (pillarCounts[t.pillar] || 0) + 1; });
+
+    const hour = new Date().getHours();
+    const greeting = hour < 12 ? 'Bom dia' : hour < 18 ? 'Boa tarde' : 'Boa noite';
+    const currentLevel = getLevel(currentUser.xp);
+    const nextLevelXp = getNextLevelXp(currentUser.xp);
+
+    return { todayTasks, total, completed, progress, nextTask, pillarCounts, greeting, currentLevel, nextLevelXp };
+  }, [tasks, currentUser, todayStr, categoryFilter]);
+
+  const calendarDays = useMemo(() => {
+    const year = calendarDate.getFullYear();
+    const month = calendarDate.getMonth();
+    const firstDayOfMonth = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    
+    const days = [];
+    for (let i = 0; i < firstDayOfMonth; i++) days.push(null);
+    for (let i = 1; i <= daysInMonth; i++) {
+      const d = new Date(year, month, i);
+      const ds = formatDateLocal(d); // Usa função segura para timezone
+      const dayTasks = getFilteredTasks(ds, selectedMemberId);
+      
+      let status: 'none' | 'done' | 'partial' | 'pending' = 'none';
+      if (dayTasks.length > 0) {
+        const completedCount = dayTasks.filter(t => t.completed).length;
+        if (completedCount === dayTasks.length) status = 'done';
+        else if (completedCount > 0) status = 'partial';
+        else status = 'pending';
+      }
+      days.push({ day: i, dateStr: ds, status, taskCount: dayTasks.length });
+    }
+    return days;
+  }, [calendarDate, selectedMemberId, tasks, categoryFilter, familyMembers]);
+
+  // --- Handlers ---
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    const { email, password } = e.currentTarget as any;
+    const found = allProfiles.find(p => p.email === email.value && p.password === password.value);
+    if (found) {
+      setCurrentUser(found);
+      setSelectedMemberId(found.id);
+      setAuthMode(found.familyId ? 'login' : 'family-choice');
+      if (found.familyId) setView(ViewMode.DASHBOARD);
+      showToast(`Bem-vindo, ${found.name}`);
+    } else {
+      setAuthError("E-mail ou senha não coincidem.");
+    }
+  };
+
+  const handleSignup = (e: React.FormEvent) => {
+    e.preventDefault();
+    const { name, email, password } = e.currentTarget as any;
+    if (allProfiles.some(p => p.email === email.value)) {
+      setAuthError("E-mail já está sendo usado.");
+      return;
+    }
+    const newProfile: Profile = {
+      id: Date.now().toString(),
+      name: name.value,
+      email: email.value,
+      password: password.value,
+      role: 'Outro',
+      familyId: '',
+      phrase: 'Foco no progresso.',
+      mission: 'Desenvolver disciplina e gerar valor.',
+      xp: 0,
+      level: 1
+    };
+    setAllProfiles([...allProfiles, newProfile]);
+    setCurrentUser(newProfile);
+    setSelectedMemberId(newProfile.id);
+    setAuthMode('family-choice');
+  };
+
+  const handleCreateFamily = (e: React.FormEvent) => {
+    e.preventDefault();
+    const { familyName } = e.currentTarget as any;
+    const newFam: Family = {
+      id: 'fam-' + Date.now().toString(),
+      name: familyName.value,
+      uniqueCode: 'LEG-' + Math.random().toString(36).substring(2, 6).toUpperCase()
+    };
+    setFamilies([...families, newFam]);
+    if (currentUser) {
+      const updated = { ...currentUser, familyId: newFam.id, role: 'Pai' as ProfileRole };
+      setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p));
+      setCurrentUser(updated);
+      setView(ViewMode.DASHBOARD);
+      showToast('Legado fundado com sucesso!');
+    }
+  };
+
+  const handleJoinFamily = (e: React.FormEvent) => {
+    e.preventDefault();
+    const { code } = e.currentTarget as any;
+    const cleanCode = code.value.trim().toUpperCase();
+    let fam = families.find(f => f.uniqueCode === cleanCode);
+    if (!fam && cleanCode.startsWith('LEG-')) {
+      fam = { id: 'fam-' + Date.now().toString(), name: 'Legado Novo', uniqueCode: cleanCode };
+      setFamilies([...families, fam]);
+    }
+    if (fam && currentUser) {
+      const updated = { ...currentUser, familyId: fam.id };
+      setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p));
+      setCurrentUser(updated);
+      setView(ViewMode.DASHBOARD);
+      showToast('Você ingressou no Legado!');
+    } else {
+      setAuthError("Código inválido.");
+    }
+  };
+
   const handleSmartInput = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim()) return;
-
+    if (!inputText.trim() || !currentUser) return;
     if (view === ViewMode.AI) {
-      const userMsg = inputText;
-      setInputText('');
-      setAiChat(prev => [...prev, { role: 'user', text: userMsg }]);
+      const msg = inputText; setInputText('');
+      setAiChat([...aiChat, { role: 'user', text: msg }]);
       setIsAiLoading(true);
-      const aiReply = await getAIResponse(userMsg, { tasks, goals, activeProfile });
+      const reply = await getAIResponse(msg, { tasks, goals, activeProfile: currentUser });
       setIsAiLoading(false);
-      setAiChat(prev => [...prev, { role: 'model', text: aiReply }]);
+      setAiChat(prev => [...prev, { role: 'model', text: reply }]);
     } else {
       setIsAiLoading(true);
       const parsed = await parseSmartTask(inputText);
       setIsAiLoading(false);
-      const newTask: Task = {
-        id: Date.now().toString(),
-        title: parsed?.title || inputText,
-        completed: false,
-        date: parsed?.date || selectedDate,
-        pillar: (parsed?.pillar as PillarType) || 'Intelectual',
-        profileId: activeProfileId
-      };
-      setTasks([newTask, ...tasks]);
+      if (parsed) {
+        const xp = parsed.priority === 'Alta' ? 50 : parsed.priority === 'Média' ? 30 : 15;
+        const newTask: Task = {
+           id: Date.now().toString(), 
+           title: parsed.title, 
+           completed: false, 
+           date: parsed.date || selectedDate, 
+           pillar: parsed.pillar, 
+           profileId: currentUser.id, 
+           priority: parsed.priority as PriorityType,
+           xpReward: xp
+        };
+        setTasks([newTask, ...tasks]);
+        showToast(`Dever criado: ${parsed.title}`, 'success');
+      } else {
+        const newTask: Task = { id: Date.now().toString(), title: inputText, completed: false, date: selectedDate, pillar: 'Intelectual', profileId: currentUser.id, priority: 'Média', xpReward: 30 };
+        setTasks([newTask, ...tasks]);
+        showToast('Dever criado (padrão)', 'success');
+      }
       setInputText('');
     }
   };
 
-  const toggleTask = (id: string) => {
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
-  };
-
-  const openProfileEditor = (profile: Profile) => {
-    setEditingProfile({ ...profile });
-    setIsProfileModalOpen(true);
-  };
-
-  const saveProfile = () => {
-    if (editingProfile) {
-      setProfiles(prev => prev.map(p => p.id === editingProfile.id ? editingProfile : p));
-      setIsProfileModalOpen(false);
-      setEditingProfile(null);
+  const openTaskModal = (task?: Task) => {
+    if (task) {
+      setEditingTask(task);
+      setTaskForm({
+        title: task.title,
+        date: task.date,
+        time: task.time || '',
+        pillar: task.pillar,
+        assignee: task.profileId,
+        recurrence: task.recurrence,
+        priority: task.priority
+      });
+    } else {
+      setEditingTask(null);
+      setTaskForm({
+        title: '',
+        date: selectedDate,
+        time: '',
+        pillar: 'Estudos',
+        assignee: selectedMemberId || currentUser?.id || '',
+        recurrence: undefined,
+        priority: 'Média'
+      });
     }
+    setShowTaskModal(true);
   };
 
-  const addProfile = () => {
-    const newProfile: Profile = { 
+  const handleSaveTask = () => {
+    if (!taskForm.title.trim() || !currentUser) return;
+
+    const xp = taskForm.priority === 'Alta' ? 50 : taskForm.priority === 'Média' ? 30 : 15;
+
+    if (editingTask) {
+      setTasks(tasks.map(t => t.id === editingTask.id ? { 
+        ...t, 
+        title: taskForm.title,
+        date: taskForm.date,
+        time: taskForm.time,
+        pillar: taskForm.pillar,
+        profileId: taskForm.assignee,
+        recurrence: taskForm.recurrence,
+        priority: taskForm.priority,
+        xpReward: xp
+      } : t));
+      showToast('Dever atualizado');
+    } else {
+      const newTask: Task = {
+        id: Date.now().toString(),
+        title: taskForm.title,
+        completed: false,
+        date: taskForm.date,
+        time: taskForm.time,
+        pillar: taskForm.pillar,
+        profileId: taskForm.assignee,
+        isFamilyTask: false,
+        recurrence: taskForm.recurrence,
+        priority: taskForm.priority,
+        xpReward: xp
+      };
+      setTasks([...tasks, newTask]);
+      showToast('Dever criado com sucesso');
+    }
+    setShowTaskModal(false);
+  };
+
+  // Goal Handler
+  const openGoalModal = () => {
+    setGoalForm({ title: '', pillar: 'Intelectual', type: 'Curto' });
+    setShowGoalModal(true);
+  };
+
+  const handleSaveGoal = () => {
+    if (!goalForm.title.trim() || !currentUser) return;
+    setGoals([...goals, { 
       id: Date.now().toString(), 
-      name: 'Novo Membro', 
-      role: 'Outro',
-      familyId: DEFAULT_FAMILY_ID,
-      avatar: ''
-    };
-    setProfiles([...profiles, newProfile]);
-    openProfileEditor(newProfile);
+      title: goalForm.title, 
+      pillar: goalForm.pillar, 
+      deadline: '2025-12-31', 
+      type: goalForm.type, 
+      progress: 0, 
+      profileId: currentUser.id, 
+      milestones: [] 
+    }]);
+    setShowGoalModal(false);
+    showToast('Objetivo fundado!', 'success');
   };
 
-  const deleteProfile = (id: string) => {
-    if (profiles.length === 1) {
-      alert("A família precisa de pelo menos um administrador.");
-      return;
-    }
-    if (confirm("Deseja remover este membro da família Legado?")) {
-      setProfiles(profiles.filter(p => p.id !== id));
-      if (activeProfileId === id) setActiveProfileId(profiles[0].id);
-      setIsProfileModalOpen(false);
-    }
-  };
-
-  const addRule = () => {
-    const title = prompt("Título da Regra:");
-    if (!title) return;
-    const description = prompt("Descrição:");
-    const icon = prompt("Emoji representativo:") || '📜';
-    const newRule: FamilyRule = { id: Date.now().toString(), title, description: description || '', icon };
-    setRules([...rules, newRule]);
-  };
-
-  const addDuty = () => {
-    const title = prompt("Qual o novo dever doméstico?");
-    if (!title) return;
-    const frequency = prompt("Frequência (Diária, Semanal, Mensal):") as FamilyResponsibility['frequency'];
-    const assignedId = prompt("ID do Responsável (ou 'family' para todos):") || 'family';
+  const getNextDate = (current: string, type: RecurrenceType) => {
+    const [y, m, d] = current.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
     
-    const newDuty: FamilyResponsibility = { 
-      id: Date.now().toString(), 
-      title, 
-      frequency: ['Diária', 'Semanal', 'Mensal'].includes(frequency) ? frequency : 'Diária',
-      assignedProfileId: assignedId
-    };
-    setResponsibilities([...responsibilities, newDuty]);
+    if (type === 'Diário') date.setDate(date.getDate() + 1);
+    if (type === 'Semanal') date.setDate(date.getDate() + 7);
+    if (type === 'Mensal') date.setMonth(date.getMonth() + 1);
+    if (type === 'Anual') date.setFullYear(date.getFullYear() + 1);
+  
+    return formatDateLocal(date);
   };
+
+  const handleToggleTask = (taskId: string) => {
+    if (taskId.startsWith('virtual-')) {
+        showToast('Complete a tarefa original anterior primeiro.', 'error');
+        return;
+    }
+
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    const isNowCompleted = !task.completed;
+    let newTasksList = tasks.map(t => t.id === taskId ? { ...t, completed: isNowCompleted } : t);
+
+    // XP Logic
+    if (isNowCompleted) {
+        const updatedProfiles = allProfiles.map(p => {
+          if (p.id === task.profileId) {
+             const newXp = (p.xp || 0) + task.xpReward;
+             const newLevel = getLevel(newXp);
+             if (newLevel > (p.level || 1) && p.id === currentUser?.id) {
+               showToast(`LEVEL UP! Você agora é nível ${newLevel}!`, 'success');
+             } else if (p.id === currentUser?.id) {
+               showToast(`+${task.xpReward} XP Conquistado!`, 'success');
+             }
+             return { ...p, xp: newXp, level: newLevel };
+          }
+          return p;
+        });
+        setAllProfiles(updatedProfiles);
+        if (currentUser && task.profileId === currentUser.id) {
+           setCurrentUser(updatedProfiles.find(p => p.id === currentUser.id) || currentUser);
+        }
+    } else {
+        const updatedProfiles = allProfiles.map(p => {
+            if (p.id === task.profileId) {
+               return { ...p, xp: Math.max(0, (p.xp || 0) - task.xpReward) };
+            }
+            return p;
+        });
+        setAllProfiles(updatedProfiles);
+        if (currentUser && task.profileId === currentUser.id) {
+            setCurrentUser(updatedProfiles.find(p => p.id === currentUser.id) || currentUser);
+        }
+    }
+
+    // Recurrence Logic
+    if (isNowCompleted && task.recurrence) {
+        const nextDate = getNextDate(task.date, task.recurrence);
+        const newTask: Task = {
+            ...task,
+            id: Date.now().toString(),
+            date: nextDate,
+            completed: false,
+        };
+        newTasksList = [...newTasksList, newTask];
+        showToast('Próxima recorrência agendada');
+    }
+
+    setTasks(newTasksList);
+  };
+
+  const addMilestone = (goalId: string) => {
+    const text = prompt("Nome do marco:");
+    if (!text) return;
+    setGoals(goals.map(g => g.id === goalId ? { ...g, milestones: [...(g.milestones || []), { id: Date.now().toString(), title: text, completed: false }] } : g));
+  };
+
+  const toggleMilestone = (goalId: string, msId: string) => {
+    setGoals(goals.map(g => {
+        if (g.id !== goalId) return g;
+        const newMs = g.milestones?.map(m => m.id === msId ? { ...m, completed: !m.completed } : m) || [];
+        const completedCount = newMs.filter(m => m.completed).length;
+        const progress = newMs.length > 0 ? Math.round((completedCount / newMs.length) * 100) : g.progress;
+        return { ...g, milestones: newMs, progress };
+    }));
+  };
+
+  const speak = async (text: string, id: string) => {
+    if (isSpeaking) return;
+    setIsSpeaking(id);
+    const audio = await generateSpeech(text);
+    if (audio) { audio.onended = () => setIsSpeaking(null); audio.start(); }
+    else setIsSpeaking(null);
+  };
+
+  // --- Renderers ---
+
+  const renderTaskModal = () => (
+    <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 animate-fadeIn">
+      <div className="bg-white w-full max-w-sm rounded-[32px] p-6 shadow-2xl animate-slideUp max-h-[90vh] overflow-y-auto no-scrollbar">
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-lg font-black text-slate-900">{editingTask ? 'Editar Dever' : 'Novo Dever'}</h3>
+          <button onClick={() => setShowTaskModal(false)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={20} className="text-slate-500"/></button>
+        </div>
+        
+        <div className="space-y-4">
+          <div>
+            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">O que deve ser feito?</label>
+            <input 
+              value={taskForm.title}
+              onChange={e => setTaskForm({...taskForm, title: e.target.value})}
+              placeholder="Ex: Ler 10 páginas"
+              className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 px-5 outline-none focus:border-indigo-500 font-bold text-sm text-slate-800"
+              autoFocus
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+             <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Data</label>
+                <input 
+                  type="date"
+                  value={taskForm.date}
+                  onChange={e => setTaskForm({...taskForm, date: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800"
+                />
+             </div>
+             <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Horário</label>
+                <input 
+                  type="time"
+                  value={taskForm.time}
+                  onChange={e => setTaskForm({...taskForm, time: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800"
+                />
+             </div>
+          </div>
+
+          <div>
+             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Prioridade</label>
+             <div className="flex gap-2">
+                {PRIORITY_OPTIONS.map(p => (
+                   <button 
+                     key={p} 
+                     onClick={() => setTaskForm({...taskForm, priority: p})} 
+                     className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${taskForm.priority === p ? 'bg-slate-800 text-white border-slate-800 shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}
+                   >
+                     {p}
+                   </button>
+                ))}
+             </div>
+          </div>
+
+          <div>
+             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Frequência (Recorrência)</label>
+             <div className="flex flex-wrap gap-2">
+               <button onClick={() => setTaskForm({...taskForm, recurrence: undefined})} className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wide border transition-all ${!taskForm.recurrence ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}>Única</button>
+               {RECURRENCE_OPTIONS.map(r => (
+                 <button key={r} onClick={() => setTaskForm({...taskForm, recurrence: r})} className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wide border transition-all ${taskForm.recurrence === r ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}>{r}</button>
+               ))}
+             </div>
+          </div>
+
+          <div>
+             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Pilar de Desenvolvimento</label>
+             <div className="flex flex-wrap gap-2">
+               {PILLAR_OPTIONS.map(p => (
+                 <button key={p} onClick={() => setTaskForm({...taskForm, pillar: p})} className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wide border transition-all ${taskForm.pillar === p ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}>{p}</button>
+               ))}
+             </div>
+          </div>
+
+          {(currentUser?.role === 'Pai' || currentUser?.role === 'Mãe') && (
+            <div>
+              <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Responsável</label>
+              <select value={taskForm.assignee} onChange={e => setTaskForm({...taskForm, assignee: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800">
+                {familyMembers.map(m => ( <option key={m.id} value={m.id}>{m.name} ({m.role})</option>))}
+              </select>
+            </div>
+          )}
+
+          <button onClick={handleSaveTask} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-indigo-600/20 active:scale-95 transition-transform mt-4">
+            {editingTask ? 'Salvar Alterações' : 'Criar Dever'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderGoalModal = () => (
+    <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 animate-fadeIn">
+      <div className="bg-white w-full max-w-sm rounded-[32px] p-6 shadow-2xl animate-slideUp">
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-lg font-black text-slate-900">Novo Objetivo</h3>
+          <button onClick={() => setShowGoalModal(false)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={20} className="text-slate-500"/></button>
+        </div>
+        <div className="space-y-4">
+            <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Objetivo</label>
+                <input value={goalForm.title} onChange={e => setGoalForm({...goalForm, title: e.target.value})} placeholder="Ex: Ler 12 livros" className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 px-5 outline-none focus:border-indigo-500 font-bold text-sm text-slate-800" autoFocus />
+            </div>
+            <div>
+                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Tipo de Prazo</label>
+                 <div className="flex gap-2">
+                     {['Curto', 'Médio', 'Longo'].map(t => (
+                         <button key={t} onClick={() => setGoalForm({...goalForm, type: t as any})} className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase border transition-all ${goalForm.type === t ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-500 border-slate-200'}`}>{t}</button>
+                     ))}
+                 </div>
+            </div>
+            <div>
+                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Pilar</label>
+                 <select value={goalForm.pillar} onChange={e => setGoalForm({...goalForm, pillar: e.target.value as any})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800">
+                    {PILLAR_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+                 </select>
+            </div>
+            <button onClick={handleSaveGoal} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg active:scale-95 transition-transform mt-2">Fundar Objetivo</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderAgendaControls = () => {
+    const isAdmin = currentUser?.role === 'Pai' || currentUser?.role === 'Mãe';
+    return (
+      <div className="space-y-4 mb-6">
+        <div className="flex items-center justify-between">
+          <div className="flex bg-slate-200/50 p-1 rounded-[16px]">
+            <button onClick={() => setAgendaType('daily')} className={`px-4 py-2 rounded-[12px] text-[10px] font-black uppercase transition-all flex items-center gap-2 ${agendaType === 'daily' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><List size={14}/> Diário</button>
+            <button onClick={() => setAgendaType('monthly')} className={`px-4 py-2 rounded-[12px] text-[10px] font-black uppercase transition-all flex items-center gap-2 ${agendaType === 'monthly' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><LayoutGrid size={14}/> Mensal</button>
+          </div>
+          <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value as any)} className="bg-white border border-slate-100 rounded-xl px-3 py-2 text-[10px] font-black uppercase text-slate-500 outline-none shadow-sm">
+            <option value="all">Tudo</option>
+            <option value="Estudos">Estudos</option>
+            <option value="Trabalho">Trabalho</option>
+            <option value="Família">Rotina</option>
+          </select>
+        </div>
+        {isAdmin && agendaType === 'monthly' && (
+          <div className="flex items-center gap-3 bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm group hover:border-indigo-200 transition-all">
+            <UserCog size={18} className="text-indigo-400" />
+            <div className="flex-1">
+               <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1">Visualizando Agenda de:</p>
+               <select value={selectedMemberId} onChange={(e) => setSelectedMemberId(e.target.value)} className="w-full bg-transparent text-sm font-black text-slate-800 outline-none">
+                {familyMembers.map(m => ( <option key={m.id} value={m.id}>{m.name} ({m.role})</option>))}
+              </select>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderMonthlyCalendar = () => {
+    const monthName = calendarDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    const weekDays = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+
+    return (
+      <div className="bg-white rounded-[40px] p-8 border border-slate-100 shadow-sm animate-fadeIn relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-8 opacity-[0.03] pointer-events-none"><Calendar size={120} /></div>
+        <div className="flex justify-between items-center mb-8 relative z-10">
+          <button onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1, 1))} className="p-3 hover:bg-slate-50 rounded-2xl transition-colors"><ChevronLeft size={20}/></button>
+          <div className="text-center">
+             <h3 className="text-sm font-black uppercase tracking-[0.2em] text-slate-800 leading-none">{monthName}</h3>
+             <button onClick={() => { setCalendarDate(new Date()); setSelectedDate(todayStr); }} className="text-[8px] font-black text-indigo-500 uppercase mt-2 tracking-widest hover:underline">Voltar para Hoje</button>
+          </div>
+          <button onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1, 1))} className="p-3 hover:bg-slate-50 rounded-2xl transition-colors"><ChevronRight size={20}/></button>
+        </div>
+        <div className="grid grid-cols-7 mb-4">
+          {weekDays.map(d => <div key={d} className="text-center text-[10px] font-black text-slate-300 py-2">{d}</div>)}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {calendarDays.map((dayObj, idx) => {
+            if (!dayObj) return <div key={`empty-${idx}`} className="aspect-square" />;
+            const isToday = dayObj.dateStr === todayStr;
+            const isSelected = dayObj.dateStr === selectedDate;
+            return (
+              <button key={dayObj.dateStr} onClick={() => { setSelectedDate(dayObj.dateStr); setAgendaType('daily'); }} className={`aspect-square flex flex-col items-center justify-center rounded-2xl relative transition-all group ${isSelected ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-600/30' : isToday ? 'bg-indigo-50 text-indigo-600' : 'hover:bg-slate-50 text-slate-800'}`}>
+                <span className="text-xs font-black">{dayObj.day}</span>
+                {dayObj.status !== 'none' && ( <div className={`w-1.5 h-1.5 rounded-full mt-1 ${ dayObj.status === 'done' ? 'bg-emerald-500' : dayObj.status === 'partial' ? 'bg-amber-500' : 'bg-red-500'} ${isSelected ? 'bg-white' : ''}`} />)}
+                {dayObj.taskCount > 0 && !isSelected && <span className="absolute top-1 right-1 text-[7px] font-black text-slate-300 opacity-0 group-hover:opacity-100">{dayObj.taskCount}</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // --- Main Render ---
+
+  if (!currentUser || (currentUser && !currentUser.familyId && authMode === 'family-choice')) {
+    // Auth screens (Login/Signup/Family) - Same as before but with toast support
+    return (
+      <div className="max-w-md mx-auto h-screen bg-slate-900 flex flex-col p-8 text-white relative overflow-hidden">
+        {notification && (
+            <div className={`fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-xl z-[100] font-black text-xs uppercase tracking-wider animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}`}>
+                {notification.msg}
+            </div>
+        )}
+        <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[80%] h-[80%] bg-indigo-600 rounded-full blur-[150px]" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-emerald-600 rounded-full blur-[150px]" />
+        </div>
+        {/* ... (Auth content preserved structure) ... */}
+        <div className="relative z-10 flex flex-col h-full justify-center space-y-8 animate-fadeIn">
+          <div className="text-center space-y-3">
+             <div className="w-20 h-20 bg-indigo-600 rounded-[30px] mx-auto flex items-center justify-center shadow-2xl shadow-indigo-600/30 mb-4 rotate-3 border border-white/10">
+                <Shield size={40} className="-rotate-3"/>
+             </div>
+             <h1 className="text-4xl font-black tracking-tighter uppercase">Legado</h1>
+             <p className="text-slate-400 text-[10px] font-black uppercase tracking-[0.4em] opacity-80">Disciplina & Ordem</p>
+          </div>
+          {authError && <div className="bg-red-500/20 border border-red-500/30 p-4 rounded-2xl flex items-center gap-3 text-red-400 animate-shake text-xs font-bold"><AlertCircle size={16}/> {authError}</div>}
+          {authMode === 'login' && (
+            <form onSubmit={handleLogin} className="space-y-4 animate-slideUp">
+              <input name="email" type="email" placeholder="Seu E-mail" required className="w-full bg-slate-800/60 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 font-medium text-sm" />
+              <input name="password" type="password" placeholder="Senha" required className="w-full bg-slate-800/60 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 font-medium text-sm" />
+              <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl font-black text-sm shadow-xl shadow-indigo-600/20 transition-all active:scale-95 uppercase tracking-widest">Acessar Sistema</button>
+              <button type="button" onClick={() => setAuthMode('signup')} className="w-full text-xs text-slate-500 font-bold hover:text-white transition-colors">Ainda não tem conta? Registrar</button>
+            </form>
+          )}
+          {authMode === 'signup' && (
+            <form onSubmit={handleSignup} className="space-y-4 animate-slideUp">
+              <input name="name" placeholder="Nome Completo" required className="w-full bg-slate-800/60 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 text-sm font-bold" />
+              <input name="email" type="email" placeholder="Melhor E-mail" required className="w-full bg-slate-800/60 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 text-sm font-bold" />
+              <input name="password" type="password" placeholder="Crie uma Senha" required className="w-full bg-slate-800/60 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 text-sm font-bold" />
+              <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-2xl font-black text-sm shadow-xl shadow-indigo-600/20 transition-all active:scale-95 uppercase tracking-widest">Criar meu Perfil</button>
+              <button type="button" onClick={() => setAuthMode('login')} className="w-full text-xs text-slate-500 font-bold hover:text-white">Já possuo acesso</button>
+            </form>
+          )}
+          {authMode === 'family-choice' && (
+            <div className="space-y-6 animate-slideUp">
+               {familyAction === 'none' ? (
+                <div className="grid grid-cols-1 gap-4">
+                  <button onClick={() => setFamilyAction('create')} className="bg-slate-800/80 p-8 rounded-[40px] border border-slate-700 flex flex-col items-center gap-4 transition-all hover:bg-slate-700 group ring-1 ring-white/5">
+                    <div className="w-16 h-16 bg-indigo-600/20 text-indigo-400 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform"><Plus size={32}/></div>
+                    <div className="text-center"><h3 className="font-black text-lg">Fundar Legado</h3><p className="text-[10px] text-slate-500 uppercase tracking-widest">Nova Família</p></div>
+                  </button>
+                  <button onClick={() => setFamilyAction('join')} className="bg-slate-800/80 p-8 rounded-[40px] border border-slate-700 flex flex-col items-center gap-4 transition-all hover:bg-slate-700 group ring-1 ring-white/5">
+                    <div className="w-16 h-16 bg-emerald-600/20 text-emerald-400 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform"><UsersRound size={32}/></div>
+                    <div className="text-center"><h3 className="font-black text-lg">Unir-se a Família</h3><p className="text-[10px] text-slate-500 uppercase tracking-widest">Possuo um Código</p></div>
+                  </button>
+                </div>
+              ) : familyAction === 'create' ? (
+                <form onSubmit={handleCreateFamily} className="space-y-4 bg-slate-800/50 p-8 rounded-[40px] border border-slate-700 shadow-2xl">
+                  <button type="button" onClick={() => setFamilyAction('none')} className="text-slate-500 flex items-center gap-2 text-[10px] font-black uppercase"><ChevronLeft size={14}/> Voltar</button>
+                  <h3 className="text-center font-black text-indigo-400 uppercase tracking-widest text-sm mb-2">Nome do seu Legado</h3>
+                  <input name="familyName" placeholder="Ex: Legado Santos" required className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-indigo-500 text-sm font-bold text-center" />
+                  <button type="submit" className="w-full bg-indigo-600 py-4 rounded-2xl font-black text-sm uppercase">Fundar Agora</button>
+                </form>
+              ) : (
+                <form onSubmit={handleJoinFamily} className="space-y-4 bg-slate-800/50 p-8 rounded-[40px] border border-slate-700 shadow-2xl">
+                  <button type="button" onClick={() => setFamilyAction('none')} className="text-slate-500 flex items-center gap-2 text-[10px] font-black uppercase"><ChevronLeft size={14}/> Voltar</button>
+                  <h3 className="text-center font-black text-emerald-400 uppercase tracking-widest text-sm mb-2">Ingresso de Membro</h3>
+                  <p className="text-[10px] text-slate-500 text-center italic">Use 'LEG-1234' para demonstração.</p>
+                  <input name="code" placeholder="CÓDIGO LEG-XXXX" required className="w-full bg-slate-900 border border-slate-700 rounded-2xl py-4 px-6 outline-none focus:border-emerald-500 text-sm font-black text-center tracking-widest uppercase" />
+                  <button type="submit" className="w-full bg-emerald-600 py-4 rounded-2xl font-black text-sm uppercase">Unir-se ao Grupo</button>
+                </form>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-md mx-auto h-screen bg-slate-50 flex flex-col shadow-2xl overflow-hidden relative border-x border-slate-200">
       
-      {/* Profile Detail Modal */}
-      {isProfileModalOpen && editingProfile && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white w-full max-w-sm rounded-[40px] shadow-2xl overflow-hidden flex flex-col animate-slideUp">
-            <div className="relative h-32 bg-slate-900">
-               <button onClick={() => setIsProfileModalOpen(false)} className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors">
-                 <X size={20} />
-               </button>
-               <div className="absolute -bottom-12 left-8">
-                  <div className="relative group">
-                    {editingProfile.avatar ? (
-                      <img src={editingProfile.avatar} className="w-24 h-24 rounded-[32px] border-4 border-white object-cover shadow-lg" alt="Avatar" />
-                    ) : (
-                      <div className="w-24 h-24 rounded-[32px] border-4 border-white bg-indigo-600 flex items-center justify-center text-white text-3xl font-black shadow-lg">
-                        {editingProfile.name[0]}
-                      </div>
-                    )}
-                    <button className="absolute bottom-0 right-0 p-2 bg-indigo-600 rounded-xl text-white shadow-lg translate-x-2 translate-y-2 hover:scale-110 transition-transform">
-                      <Camera size={16} />
-                    </button>
-                  </div>
-               </div>
-            </div>
-
-            <div className="pt-16 p-8 space-y-5">
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Nome do Membro</label>
-                <input 
-                  value={editingProfile.name}
-                  onChange={(e) => setEditingProfile({...editingProfile, name: e.target.value})}
-                  className="w-full text-xl font-black text-slate-800 outline-none p-2 bg-slate-50 rounded-2xl border border-transparent focus:border-indigo-100 transition-all"
-                  placeholder="Nome Completo"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Papel</label>
-                  <select 
-                    value={editingProfile.role}
-                    onChange={(e) => setEditingProfile({...editingProfile, role: e.target.value as any})}
-                    className="w-full text-xs font-bold text-slate-800 outline-none p-3 bg-slate-50 rounded-2xl border border-transparent focus:border-indigo-100 transition-all"
-                  >
-                    <option value="Pai">Pai</option>
-                    <option value="Mãe">Mãe</option>
-                    <option value="Filho">Filho</option>
-                    <option value="Filha">Filha</option>
-                    <option value="Outro">Outro</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Aniversário</label>
-                  <div className="relative">
-                    <input 
-                      type="date"
-                      value={editingProfile.birthday || ''}
-                      onChange={(e) => setEditingProfile({...editingProfile, birthday: e.target.value})}
-                      className="w-full text-xs font-bold text-slate-800 outline-none p-3 bg-slate-50 rounded-2xl border border-transparent focus:border-indigo-100 transition-all"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Bio / Propósito</label>
-                <textarea 
-                  value={editingProfile.bio || ''}
-                  onChange={(e) => setEditingProfile({...editingProfile, bio: e.target.value})}
-                  className="w-full text-xs font-medium text-slate-600 outline-none p-3 bg-slate-50 rounded-2xl border border-transparent focus:border-indigo-100 transition-all min-h-[80px] resize-none"
-                  placeholder="Defina o propósito deste membro..."
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Foto (URL)</label>
-                <input 
-                  value={editingProfile.avatar || ''}
-                  onChange={(e) => setEditingProfile({...editingProfile, avatar: e.target.value})}
-                  className="w-full text-xs font-medium text-indigo-600 outline-none p-3 bg-slate-50 rounded-2xl border border-transparent focus:border-indigo-100 transition-all"
-                  placeholder="https://exemplo.com/foto.jpg"
-                />
-              </div>
-
-              <div className="flex gap-3 pt-2">
-                <button onClick={() => deleteProfile(editingProfile.id)} className="flex-1 py-4 text-xs font-black text-red-500 hover:bg-red-50 rounded-2xl transition-all">REMOVER</button>
-                <button onClick={saveProfile} className="flex-[2] py-4 bg-slate-900 text-white text-xs font-black rounded-3xl shadow-xl hover:bg-black transition-all flex items-center justify-center gap-2">
-                  <Save size={16}/> SALVAR ALTERAÇÕES
-                </button>
-              </div>
-            </div>
-          </div>
+      {/* Notifications */}
+      {notification && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-xl z-[100] font-black text-xs uppercase tracking-wider animate-slideDown flex items-center gap-2 ${notification.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}`}>
+            {notification.type === 'success' ? <Check size={14} /> : <AlertCircle size={14} />}
+            {notification.msg}
         </div>
       )}
 
-      {/* Premium Header */}
+      {/* Universal Header */}
       <header className="p-5 bg-slate-900 text-white flex justify-between items-center sticky top-0 z-50">
         <div className="flex items-center gap-3">
-          <div 
-            onClick={() => openProfileEditor(activeProfile)}
-            className="w-12 h-12 rounded-full border-2 border-indigo-500 bg-slate-800 flex items-center justify-center font-bold text-xl shadow-inner cursor-pointer overflow-hidden"
-          >
-            {activeProfile.avatar ? (
-              <img src={activeProfile.avatar} className="w-full h-full object-cover" alt="Me" />
-            ) : (
-              activeProfile.name[0]
-            )}
-          </div>
-          <div className="cursor-pointer" onClick={() => openProfileEditor(activeProfile)}>
-            <h1 className="text-base font-extrabold leading-tight tracking-tight">{activeProfile.name}</h1>
-            <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest">{activeProfile.role} • Legado</p>
+          <button onClick={() => { setView(ViewMode.PROFILE); setFilterOverdue(false); }} className="w-10 h-10 rounded-[12px] bg-indigo-500 flex items-center justify-center font-black shadow-inner border border-white/10 overflow-hidden relative group">
+            {currentUser.avatar ? <img src={currentUser.avatar} className="w-full h-full object-cover" /> : currentUser.name[0]}
+            <div className="absolute -bottom-1 -right-1 bg-amber-400 text-amber-900 text-[8px] font-black w-4 h-4 rounded-full flex items-center justify-center border border-white">{getLevel(currentUser.xp)}</div>
+          </button>
+          <div>
+            <h1 className="text-sm font-black tracking-tight leading-none mb-1">{currentUser.name}</h1>
+            <div className="flex items-center gap-1.5">
+               <span className="text-[9px] text-indigo-400 font-black uppercase tracking-[0.2em]">{activeFamily?.name}</span>
+               {isSyncing ? <CloudCheck size={10} className="text-emerald-400 animate-pulse" /> : <CloudCheck size={10} className="text-slate-600" />}
+            </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-           <button onClick={() => setView(ViewMode.AI)} className="p-2.5 bg-indigo-600 rounded-xl hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-900/40 border border-indigo-400/20">
-             <Sparkles size={20} />
-           </button>
-        </div>
+        <button onClick={() => { setCurrentUser(null); setView(ViewMode.DASHBOARD); setFilterOverdue(false); }} className="p-2 text-slate-500 hover:text-white transition-colors"><LogOut size={20} /></button>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto no-scrollbar p-5 pb-32">
+      {/* Main Viewport */}
+      <main className="flex-1 overflow-y-auto no-scrollbar p-5 pb-36">
         
-        {view === ViewMode.DASHBOARD && (
+        {view === ViewMode.DASHBOARD && dashboardData && (
           <div className="space-y-6 animate-fadeIn">
-            <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xl shadow-slate-200/50">
-               <div className="flex justify-between items-center mb-6">
-                 <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">Estado dos Pilares</h2>
-                 <Flame size={16} className="text-orange-500 animate-pulse" />
-               </div>
-               <div className="grid grid-cols-1 gap-4">
-                 {(['Espiritual', 'Estudos', 'Saúde', 'Intelectual'] as PillarType[]).map(p => (
-                   <div key={p} className="flex items-center gap-4">
-                      <div className={`p-2 rounded-xl ${PILLAR_COLORS[p]}`}>{PILLAR_ICONS[p]}</div>
-                      <div className="flex-1">
-                        <div className="flex justify-between mb-1 text-[11px] font-bold text-slate-700">
-                          <span>{p}</span>
-                          <span>75%</span>
-                        </div>
-                        <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
-                          <div className={`h-full bg-indigo-600 transition-all duration-1000 w-[75%]`} />
-                        </div>
+            
+            {/* HERO: Status do Dia & Próxima Missão */}
+            <div className="bg-gradient-to-br from-indigo-900 to-slate-900 rounded-[40px] p-8 text-white shadow-2xl relative overflow-hidden ring-1 ring-white/10">
+              <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none"><ShieldCheck size={140} /></div>
+              
+              <div className="relative z-10">
+                <div className="flex justify-between items-start mb-6">
+                   <div>
+                     <p className="text-[10px] font-black uppercase tracking-[0.3em] text-indigo-400 mb-1">{dashboardData.greeting}</p>
+                     <h2 className="text-2xl font-black tracking-tight">Comandante {currentUser.name.split(' ')[0]}</h2>
+                   </div>
+                   <div className="flex flex-col items-end">
+                      <div onClick={() => { navigator.clipboard.writeText(activeFamily?.uniqueCode || ''); setCopiedCode(true); setTimeout(() => setCopiedCode(false), 2000); }} className="bg-white/10 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10 flex items-center gap-2 cursor-pointer active:scale-95 transition-transform">
+                          <span className="text-[9px] font-black uppercase tracking-widest">{activeFamily?.uniqueCode}</span>
+                          {copiedCode ? <Check size={10} className="text-emerald-400"/> : <Copy size={10} className="text-slate-400"/>}
+                      </div>
+                      <span className="text-[8px] font-black text-amber-400 mt-1 uppercase tracking-widest">{currentUser.xp} XP</span>
+                   </div>
+                </div>
+
+                {/* Progress Circle & Next Task */}
+                <div className="flex items-center gap-6">
+                   <div className="relative w-20 h-20 flex-shrink-0 flex items-center justify-center group">
+                      <svg className="w-full h-full -rotate-90">
+                        <circle cx="40" cy="40" r="36" stroke="currentColor" strokeWidth="6" fill="transparent" className="text-indigo-950" />
+                        <circle cx="40" cy="40" r="36" stroke="currentColor" strokeWidth="6" fill="transparent" className="text-indigo-500 transition-all duration-1000 ease-out" strokeDasharray="226.2" strokeDashoffset={226.2 - (226.2 * dashboardData.progress) / 100} strokeLinecap="round" />
+                      </svg>
+                      <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        <span className="text-lg font-black">{dashboardData.progress}%</span>
                       </div>
                    </div>
-                 ))}
-               </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-4">
-               <div className="bg-slate-900 text-white p-5 rounded-3xl flex flex-col items-center justify-center shadow-xl">
-                  <Clock size={24} className="mb-2 text-indigo-400" />
-                  <span className="text-3xl font-black">{dailyStudyHours}h</span>
-                  <span className="text-[10px] font-bold opacity-50 uppercase tracking-widest">Estudos Hoje</span>
-               </div>
-               <div className="bg-emerald-600 text-white p-5 rounded-3xl flex flex-col items-center justify-center shadow-xl">
-                  <CheckSquare size={24} className="mb-2 text-emerald-200" />
-                  <span className="text-3xl font-black">{dailyTasks.filter(t => t.completed).length}</span>
-                  <span className="text-[10px] font-bold opacity-70 uppercase tracking-widest">Concluídos</span>
-               </div>
-            </div>
-
-            <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xl">
-              <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Meta de Longo Prazo</h3>
-              <div className="flex flex-col gap-2">
-                <span className="text-sm font-bold text-slate-800">Eduardo do Futuro: Concursado & Próspero</span>
-                <div className="flex items-center gap-3">
-                   <div className="flex-1 bg-slate-100 h-3 rounded-full overflow-hidden border border-slate-200">
-                      <div className="bg-gradient-to-r from-indigo-600 to-indigo-400 h-full" style={{width: '32%'}} />
+                   <div className="flex-1">
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Próxima Missão</p>
+                      {dashboardData.nextTask ? (
+                         <div onClick={() => handleToggleTask(dashboardData.nextTask!.id)} className="bg-white/5 border border-white/10 p-3 rounded-2xl flex items-center gap-3 cursor-pointer hover:bg-white/10 transition-colors group">
+                            <div className={`w-5 h-5 rounded-lg border-2 border-indigo-500 flex items-center justify-center ${dashboardData.nextTask.completed ? 'bg-indigo-500' : ''}`}>
+                               {dashboardData.nextTask.completed && <Check size={12} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                               <p className="text-sm font-bold truncate">{dashboardData.nextTask.title}</p>
+                               <div className="flex items-center gap-2 mt-0.5">
+                                 <span className="text-[8px] font-black bg-white/10 px-1.5 py-0.5 rounded text-indigo-300">{dashboardData.nextTask.pillar}</span>
+                                 <span className={`text-[8px] font-black px-1.5 py-0.5 rounded ${dashboardData.nextTask.priority === 'Alta' ? 'bg-red-500/20 text-red-300' : 'bg-slate-500/20 text-slate-400'}`}>{dashboardData.nextTask.priority}</span>
+                               </div>
+                            </div>
+                         </div>
+                      ) : (
+                        <div onClick={() => openTaskModal()} className="bg-white/5 border border-white/10 border-dashed p-3 rounded-2xl flex items-center gap-2 cursor-pointer hover:bg-white/10 transition-colors text-slate-400">
+                           <Plus size={16} />
+                           <span className="text-xs font-bold">Definir nova missão</span>
+                        </div>
+                      )}
                    </div>
-                   <span className="text-xs font-black text-indigo-600 italic">32%</span>
                 </div>
-                <p className="text-[10px] text-slate-400 italic">"Disciplina diária constrói um futuro inevitável."</p>
               </div>
+            </div>
+
+            {/* Quick Actions Row */}
+            <div className="grid grid-cols-3 gap-3">
+               <button onClick={() => openTaskModal()} className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm flex flex-col items-center gap-2 hover:border-indigo-200 transition-colors group active:scale-95">
+                  <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform"><CheckSquare size={20}/></div>
+                  <span className="text-[9px] font-black uppercase text-slate-400 tracking-tight">Novo Dever</span>
+               </button>
+               <button onClick={() => openGoalModal()} className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm flex flex-col items-center gap-2 hover:border-amber-200 transition-colors group active:scale-95">
+                  <div className="w-10 h-10 bg-amber-50 text-amber-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform"><Target size={20}/></div>
+                  <span className="text-[9px] font-black uppercase text-slate-400 tracking-tight">Nova Meta</span>
+               </button>
+               <button onClick={() => setView(ViewMode.AI)} className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm flex flex-col items-center gap-2 hover:border-purple-200 transition-colors group active:scale-95">
+                  <div className="w-10 h-10 bg-purple-50 text-purple-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform"><Sparkles size={20}/></div>
+                  <span className="text-[9px] font-black uppercase text-slate-400 tracking-tight">Mentoria</span>
+               </button>
+            </div>
+
+            {/* Pillar Distribution (Daily Focus) */}
+            <div className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+               <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2"><PieChart size={14} className="text-indigo-500"/> Foco do Dia</h3>
+                  <span className="text-[10px] font-bold text-slate-400">{dashboardData.total} deveres</span>
+               </div>
+               {dashboardData.total === 0 ? (
+                 <div className="py-6 text-center text-slate-300 text-xs font-medium italic">Nenhum dever registrado hoje.</div>
+               ) : (
+                 <div className="space-y-3">
+                    <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 w-full">
+                       {Object.entries(dashboardData.pillarCounts).map(([pillar, count]) => ( <div key={pillar} style={{ width: `${(count / dashboardData.total) * 100}%` }} className={PILLAR_BG[pillar as PillarType]} />))}
+                    </div>
+                    <div className="flex flex-wrap gap-3 mt-2">
+                       {Object.entries(dashboardData.pillarCounts).map(([pillar, count]) => (
+                          <div key={pillar} className="flex items-center gap-1.5">
+                             <div className={`w-2 h-2 rounded-full ${PILLAR_BG[pillar as PillarType]}`} />
+                             <span className="text-[9px] font-bold text-slate-600 uppercase">{pillar} ({count})</span>
+                          </div>
+                       ))}
+                    </div>
+                 </div>
+               )}
             </div>
           </div>
         )}
 
         {view === ViewMode.AGENDA && (
           <div className="space-y-4 animate-fadeIn">
-             <div className="flex items-center justify-between bg-white p-4 rounded-3xl border border-slate-100 shadow-lg mb-4">
-                <button onClick={() => {
-                  const d = new Date(selectedDate + 'T00:00:00'); d.setDate(d.getDate()-1); setSelectedDate(d.toISOString().split('T')[0]);
-                }} className="text-slate-400 p-1 hover:bg-slate-50 rounded-full"><ChevronLeft size={24}/></button>
-                <div className="text-center">
-                   <p className="text-sm font-black text-slate-800">{new Date(selectedDate + 'T00:00:00').toLocaleDateString('pt-BR', { day: 'numeric', month: 'long'})}</p>
-                   <p className="text-[10px] text-indigo-500 font-black uppercase tracking-widest">{new Date(selectedDate + 'T00:00:00').toLocaleDateString('pt-BR', { weekday: 'long'})}</p>
+            {renderAgendaControls()}
+            {agendaType === 'monthly' ? renderMonthlyCalendar() : (
+              <div className="space-y-4">
+                <div className="space-y-3">
+                  <div className={`flex justify-between items-center bg-white p-5 rounded-[28px] border border-slate-100 shadow-sm transition-opacity ${filterOverdue ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
+                    <button onClick={() => { const d = new Date(selectedDate); d.setDate(d.getDate()-1); setSelectedDate(formatDateLocal(d)); }} className="p-2 hover:bg-slate-50 rounded-xl transition-colors"><ChevronLeft size={20}/></button>
+                    <div className="text-center">
+                      <p className="text-sm font-black text-slate-800">{new Date(selectedDate + 'T00:00:00').toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' })}</p>
+                      <p className="text-[10px] uppercase text-indigo-600 font-black tracking-widest">{new Date(selectedDate + 'T00:00:00').toLocaleDateString('pt-BR', { weekday: 'long' })}</p>
+                    </div>
+                    <button onClick={() => { const d = new Date(selectedDate); d.setDate(d.getDate()+1); setSelectedDate(formatDateLocal(d)); }} className="p-2 hover:bg-slate-50 rounded-xl transition-colors"><ChevronRight size={20}/></button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => setFilterOverdue(!filterOverdue)} className={`flex-1 py-4 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all flex items-center justify-center gap-2 border ${filterOverdue ? 'bg-amber-500 text-white border-amber-600 shadow-lg shadow-amber-500/20' : 'bg-white text-slate-400 border-slate-100 hover:border-amber-200 hover:text-amber-500 shadow-sm'}`}>
+                      {filterOverdue ? <History size={14} className="animate-spin-slow" /> : <AlertCircle size={14} />} {filterOverdue ? 'Ocultar Atrasos' : 'Ver Atrasos'}
+                    </button>
+                    <button onClick={() => openTaskModal()} className="w-14 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-lg hover:bg-indigo-500 transition-colors"><Plus size={24} /></button>
+                  </div>
                 </div>
-                <button onClick={() => {
-                  const d = new Date(selectedDate + 'T00:00:00'); d.setDate(d.getDate()+1); setSelectedDate(d.toISOString().split('T')[0]);
-                }} className="text-slate-400 p-1 hover:bg-slate-50 rounded-full"><ChevronRight size={24}/></button>
-             </div>
-
-             <div className="space-y-3">
-                {dailyTasks.map(task => (
-                  <div key={task.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between group transition-all hover:shadow-md">
-                    <div className="flex items-center gap-4">
-                       <button onClick={() => toggleTask(task.id)} className={`w-6 h-6 rounded-xl border-2 flex items-center justify-center transition-all ${task.completed ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300'}`}>
-                         {task.completed && <CheckSquare size={16} />}
-                       </button>
-                       <div>
-                          <p className={`text-sm font-bold ${task.completed ? 'line-through text-slate-300' : 'text-slate-800'}`}>{task.title}</p>
-                          <div className="flex gap-2 mt-1">
-                             <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full ${PILLAR_COLORS[task.pillar]}`}>{task.pillar}</span>
-                             {task.isFamilyTask && <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded-full bg-slate-900 text-white">Familiar</span>}
-                          </div>
-                       </div>
+                
+                <div className="space-y-3">
+                  {visibleTasks.length === 0 ? (
+                    <div className="p-20 text-center space-y-4 opacity-20">
+                      <ScrollText size={60} className="mx-auto" />
+                      <p className="text-[10px] font-black uppercase tracking-[0.4em]">{filterOverdue ? 'Sem pendências atrasadas' : 'Dia sem registros'}</p>
                     </div>
-                    <button onClick={() => setTasks(tasks.filter(t => t.id !== task.id))} className="text-slate-200 hover:text-red-500 p-2 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={18}/></button>
-                  </div>
-                ))}
-                {dailyTasks.length === 0 && <div className="text-center py-20 text-slate-300 italic text-xs">Nenhum dever para esta data.</div>}
-             </div>
-          </div>
-        )}
-
-        {view === ViewMode.STUDY && (
-          <div className="space-y-6 animate-fadeIn">
-            <div className="bg-indigo-900 text-white p-6 rounded-3xl shadow-xl">
-               <div className="flex justify-between items-start mb-4">
-                 <div>
-                    <h2 className="text-xl font-black">Cronograma de Foco</h2>
-                    <p className="text-xs opacity-60">Foco: Banco do Brasil (Concurso)</p>
-                 </div>
-                 <div className="bg-indigo-800 p-2 rounded-2xl"><GraduationCap size={24}/></div>
-               </div>
-               <div className="flex gap-2">
-                  <div className="flex-1 bg-indigo-800/50 p-3 rounded-2xl text-center">
-                    <p className="text-[10px] opacity-50 uppercase font-bold">Meta Diária</p>
-                    <p className="text-lg font-black">8.0h</p>
-                  </div>
-                  <div className="flex-1 bg-indigo-800/50 p-3 rounded-2xl text-center">
-                    <p className="text-[10px] opacity-50 uppercase font-bold">Líquidas</p>
-                    <p className="text-lg font-black">{dailyStudyHours}h</p>
-                  </div>
-               </div>
-            </div>
-
-            <div className="space-y-4">
-               <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Matérias Prioritárias</h3>
-               {[
-                 { subject: 'Português', time: '07:00 - 09:00', icon: <BookOpen size={14}/> },
-                 { subject: 'Conhecimentos Bancários', time: '09:15 - 11:15', icon: <Briefcase size={14}/> },
-                 { subject: 'Informática / TI', time: '13:30 - 15:30', icon: <LayoutDashboard size={14}/> }
-               ].map((item, idx) => (
-                 <div key={idx} className="bg-white p-4 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                       <div className="p-2 bg-slate-50 text-slate-500 rounded-xl">{item.icon}</div>
-                       <div>
-                          <p className="text-sm font-bold text-slate-800">{item.subject}</p>
-                          <p className="text-[10px] text-indigo-500 font-bold">{item.time}</p>
-                       </div>
+                  ) : visibleTasks.map(t => (
+                    <div key={t.id} className={`bg-white p-5 rounded-[32px] border flex items-center gap-4 shadow-sm hover:shadow-md transition-all group relative overflow-hidden ${PRIORITY_COLORS[t.priority].replace('text-', 'border-').split(' ')[0]} ${t.isVirtual ? 'opacity-60 border-dashed bg-slate-50' : ''}`}>
+                      <button onClick={() => handleToggleTask(t.id)} className={`w-7 h-7 rounded-xl border-2 flex items-center justify-center transition-all flex-shrink-0 ${t.completed ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-600/30' : t.isVirtual ? 'border-slate-300 cursor-not-allowed' : 'border-slate-200 hover:border-indigo-400'}`}>
+                        {t.completed && <Check size={16}/>}
+                        {t.isVirtual && <Repeat size={14} className="text-slate-300" />}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-black truncate ${t.completed ? 'line-through text-slate-300' : 'text-slate-800'}`}>{t.title} {t.isVirtual && <span className="text-[8px] font-normal italic text-slate-400">(Previsto)</span>}</p>
+                        <div className="flex items-center flex-wrap gap-2 mt-1">
+                          <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full ${PILLAR_COLORS[t.pillar]}`}>{t.pillar}</span>
+                          <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full border ${PRIORITY_COLORS[t.priority]}`}>{t.priority}</span>
+                          {t.time && <span className="text-[9px] font-black text-slate-400 flex items-center gap-1"><Clock size={10}/> {t.time}</span>}
+                          {t.recurrence && <span className="text-[9px] font-black text-indigo-500 flex items-center gap-1"><Repeat size={10}/> {t.recurrence}</span>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {!t.isVirtual && (
+                            <>
+                            <button onClick={() => openTaskModal(t)} className="text-slate-300 hover:text-indigo-500 p-2"><Edit3 size={16}/></button>
+                            <button onClick={() => setTasks(tasks.filter(tk => tk.id !== t.id))} className="text-slate-300 hover:text-red-400 p-2"><Trash2 size={16}/></button>
+                            </>
+                        )}
+                      </div>
                     </div>
-                    <button className="text-[10px] font-black bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full uppercase transition-colors hover:bg-indigo-100">Iniciar</button>
-                 </div>
-               ))}
-            </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
         {view === ViewMode.GOALS && (
           <div className="space-y-6 animate-fadeIn">
-            {['Curto', 'Médio', 'Longo'].map(type => (
-              <div key={type}>
-                <div className="flex justify-between items-center mb-3 px-1 border-b border-slate-200 pb-1">
-                  <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{type} Prazo</h3>
-                  <span className="text-[10px] text-slate-300">{type === 'Curto' ? '90 Dias' : type === 'Médio' ? '1-3 Anos' : '10+ Anos'}</span>
-                </div>
-                <div className="space-y-3">
-                  {activeGoals.filter(g => g.type === type).map(g => (
-                    <div key={g.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm group">
-                      <div className="flex justify-between items-center mb-3">
-                         <span className="text-sm font-bold text-slate-800">{g.title}</span>
-                         <div className="flex items-center gap-2">
-                            <button onClick={() => setGoals(goals.filter(item => item.id !== g.id))} className="p-1.5 text-slate-200 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={14}/></button>
-                            <div className={`p-1.5 rounded-lg ${PILLAR_COLORS[g.pillar]}`}>{PILLAR_ICONS[g.pillar]}</div>
-                         </div>
-                      </div>
-                      <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                        <div className="h-full bg-emerald-500 transition-all duration-1000" style={{width: `${g.progress}%`}} />
-                      </div>
-                      <div className="flex justify-between mt-2">
-                        <span className="text-[10px] text-slate-400 font-bold">Progresso: {g.progress}%</span>
-                        <span className="text-[10px] text-indigo-500 font-black">Meta {g.pillar}</span>
-                      </div>
+            <div className="flex justify-between items-center px-2">
+               <h2 className="text-2xl font-black text-slate-900 tracking-tight">Estratégia</h2>
+               <Trophy size={24} className="text-amber-500" />
+            </div>
+            <div className="space-y-4">
+               {activeGoals.map(g => (
+                 <div key={g.id} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm space-y-4 relative group">
+                    <button onClick={() => setGoals(goals.filter(goal => goal.id !== g.id))} className="absolute top-4 right-4 text-slate-200 hover:text-red-400 transition-colors"><Trash2 size={16}/></button>
+                    <div className="flex justify-between items-start pr-8">
+                       <div>
+                          <h3 className="text-sm font-black text-slate-800">{g.title}</h3>
+                          <p className="text-[9px] font-black uppercase text-indigo-500 tracking-widest mt-1">{g.type} Prazo • {g.milestones?.length || 0} Marcos</p>
+                       </div>
+                       <span className="text-[10px] font-black text-slate-400">{g.progress}%</span>
                     </div>
-                  ))}
-                  {activeGoals.filter(g => g.type === type).length === 0 && (
-                     <button 
-                       onClick={() => {
-                         const title = prompt(`Nova meta de ${type} prazo:`);
-                         if (!title) return;
-                         setGoals([...goals, {
-                           id: Date.now().toString(),
-                           title,
-                           pillar: 'Intelectual',
-                           deadline: '2025-12-31',
-                           type: type as any,
-                           progress: 0,
-                           profileId: activeProfileId
-                         }]);
-                       }}
-                       className="w-full py-6 border-2 border-dashed border-slate-200 rounded-3xl text-[10px] font-bold text-slate-400 hover:bg-slate-100 transition-colors uppercase tracking-widest"
-                     >
-                       + Definir Meta {type} Prazo
-                     </button>
-                  )}
-                </div>
-              </div>
-            ))}
+                    <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                       <div className="h-full bg-gradient-to-r from-indigo-500 to-indigo-700 transition-all duration-1000" style={{ width: `${g.progress}%` }} />
+                    </div>
+                    {/* Milestones Area */}
+                    <div className="pt-4 border-t border-slate-50 space-y-2">
+                        {g.milestones?.map(m => (
+                            <div key={m.id} onClick={() => toggleMilestone(g.id, m.id)} className="flex items-center gap-2 cursor-pointer opacity-80 hover:opacity-100">
+                                <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${m.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300'}`}>
+                                    {m.completed && <Check size={10} />}
+                                </div>
+                                <span className={`text-xs font-medium ${m.completed ? 'line-through text-slate-300' : 'text-slate-600'}`}>{m.title}</span>
+                            </div>
+                        ))}
+                        <button onClick={() => addMilestone(g.id)} className="text-[9px] font-bold text-indigo-400 flex items-center gap-1 hover:text-indigo-600 mt-2">+ Adicionar Marco</button>
+                    </div>
+                 </div>
+               ))}
+               <button onClick={openGoalModal} className="w-full py-8 border-2 border-dashed border-slate-200 rounded-[32px] text-slate-400 font-black text-[10px] uppercase tracking-widest hover:border-indigo-300 hover:text-indigo-500 transition-all">+ Fundar Novo Objetivo</button>
+            </div>
           </div>
         )}
 
         {view === ViewMode.FAMILY && (
           <div className="space-y-6 animate-fadeIn">
-             {/* Family Tabs */}
-             <div className="flex bg-slate-200/50 p-1 rounded-2xl gap-1">
-                {(['members', 'rules', 'duties'] as const).map(tab => (
-                   <button 
-                     key={tab}
-                     onClick={() => setFamilySubView(tab)}
-                     className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${familySubView === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:text-slate-500'}`}
-                   >
-                      {tab === 'members' ? 'Membros' : tab === 'rules' ? 'Constituição' : 'Deveres'}
-                   </button>
-                ))}
+             {/* ... Family code preserved ... */}
+             <div className="flex gap-2 p-1.5 bg-slate-200/50 rounded-[24px] border border-slate-200/20">
+                <button onClick={() => setFamilySubView('ranking')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-2xl transition-all ${familySubView === 'ranking' ? 'bg-white shadow-lg text-slate-900' : 'text-slate-500'}`}>Ranking</button>
+                <button onClick={() => setFamilySubView('members')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-2xl transition-all ${familySubView === 'members' ? 'bg-white shadow-lg text-slate-900' : 'text-slate-500'}`}>Membros</button>
+                <button onClick={() => setFamilySubView('rules')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-2xl transition-all ${familySubView === 'rules' ? 'bg-white shadow-lg text-slate-900' : 'text-slate-500'}`}>Leis</button>
              </div>
+             
+             {familySubView === 'ranking' && (
+                 <div className="space-y-4">
+                     <div className="text-center mb-2">
+                        <Medal size={40} className="mx-auto text-amber-400 mb-2 drop-shadow-lg" />
+                        <h3 className="text-lg font-black text-slate-800">Elite do Legado</h3>
+                        <p className="text-[10px] uppercase tracking-widest text-slate-400">Disciplina Gera Honra</p>
+                     </div>
+                     {familyMembers.sort((a,b) => (b.xp || 0) - (a.xp || 0)).map((m, idx) => (
+                         <div key={m.id} className="bg-white p-4 rounded-[28px] border border-slate-100 shadow-sm flex items-center gap-4 relative overflow-hidden">
+                             <div className={`text-xl font-black w-8 text-center ${idx === 0 ? 'text-amber-500' : idx === 1 ? 'text-slate-400' : idx === 2 ? 'text-amber-700' : 'text-slate-300'}`}>{idx + 1}</div>
+                             <div className="w-12 h-12 rounded-xl bg-slate-100 relative overflow-hidden border border-slate-200">
+                                 {m.avatar ? <img src={m.avatar} className="w-full h-full object-cover"/> : <div className="w-full h-full flex items-center justify-center font-black text-slate-300">{m.name[0]}</div>}
+                             </div>
+                             <div className="flex-1">
+                                 <h4 className="font-black text-sm text-slate-800">{m.name} {m.id === currentUser.id && '(Eu)'}</h4>
+                                 <p className="text-[10px] font-bold text-indigo-500 uppercase">Nível {m.level || 1} • {m.role}</p>
+                             </div>
+                             <div className="text-right">
+                                 <span className="block font-black text-slate-800">{m.xp || 0}</span>
+                                 <span className="text-[8px] font-bold text-slate-400 uppercase">XP</span>
+                             </div>
+                             {idx === 0 && <Crown size={16} className="absolute top-2 right-2 text-amber-400 rotate-12" />}
+                         </div>
+                     ))}
+                 </div>
+             )}
 
              {familySubView === 'members' && (
-                <div className="space-y-6">
-                   <div className="bg-slate-900 text-white p-8 rounded-[40px] shadow-2xl relative overflow-hidden">
-                      <div className="absolute -top-10 -right-10 bg-indigo-500 w-48 h-48 rounded-full opacity-10 animate-pulse" />
-                      <Users size={32} className="text-indigo-400 mb-4" />
-                      <h2 className="text-2xl font-black tracking-tight">Família Legado</h2>
-                      <p className="text-xs text-slate-400 mt-2 italic leading-relaxed">
-                        "Onde a disciplina de um constrói a fortaleza de todos."
-                      </p>
-                      <div className="mt-6 flex -space-x-3 overflow-hidden">
-                        {profiles.map(p => (
-                          <div key={p.id} className="inline-block h-10 w-10 rounded-full ring-4 ring-slate-900 overflow-hidden bg-indigo-600 flex items-center justify-center font-bold border border-indigo-400/30">
-                            {p.avatar ? <img src={p.avatar} className="h-full w-full object-cover" /> : p.name[0]}
-                          </div>
-                        ))}
-                      </div>
-                   </div>
-
-                   <div className="grid grid-cols-1 gap-4">
-                      {profiles.map(p => (
-                        <div 
-                          key={p.id} 
-                          className={`p-6 rounded-[32px] border-2 transition-all group relative overflow-hidden flex items-center gap-5 ${p.id === activeProfileId ? 'border-indigo-600 bg-white shadow-xl' : 'border-slate-100 bg-white shadow-sm hover:border-slate-200'}`}
-                        >
-                           <div 
-                             onClick={() => setActiveProfileId(p.id)}
-                             className="cursor-pointer relative shrink-0"
-                           >
-                              {p.avatar ? (
-                                <img src={p.avatar} className="w-20 h-20 rounded-[28px] object-cover shadow-md group-hover:scale-105 transition-transform" />
-                              ) : (
-                                <div className={`w-20 h-20 rounded-[28px] flex items-center justify-center font-black text-3xl shadow-md ${p.id === activeProfileId ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
-                                  {p.name[0]}
-                                </div>
-                              )}
-                              {p.id === activeProfileId && (
-                                <div className="absolute -bottom-1 -right-1 p-1.5 bg-indigo-600 rounded-full border-4 border-white text-white">
-                                  <ShieldCheck size={12} />
-                                </div>
-                              )}
-                           </div>
-                           <div className="flex-1">
-                              <div className="flex justify-between items-start">
-                                 <div onClick={() => setActiveProfileId(p.id)} className="cursor-pointer">
-                                    <h3 className="text-lg font-black text-slate-800 group-hover:text-indigo-600 transition-colors">{p.name}</h3>
-                                    <p className="text-[10px] uppercase font-black text-indigo-500 tracking-widest">{p.role}</p>
-                                 </div>
-                                 <button 
-                                   onClick={() => openProfileEditor(p)}
-                                   className="p-2 bg-slate-50 rounded-xl text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-all opacity-0 group-hover:opacity-100"
-                                 >
-                                   <Edit3 size={18}/>
-                                 </button>
-                              </div>
-                              <p className="text-[11px] text-slate-400 mt-2 line-clamp-2 italic">{p.bio || "Sem descrição definida."}</p>
-                              {p.birthday && (
-                                <div className="flex items-center gap-1.5 mt-3 text-slate-400">
-                                   <Cake size={12} />
-                                   <span className="text-[10px] font-bold">{new Date(p.birthday).toLocaleDateString('pt-BR')}</span>
-                                </div>
-                              )}
-                           </div>
+                <div className="space-y-3">
+                   {familyMembers.map(p => (
+                     <div key={p.id} className="p-5 bg-white rounded-[32px] border border-slate-100 flex items-center gap-4 shadow-sm group">
+                        <div className="w-14 h-14 rounded-[20px] bg-slate-100 flex items-center justify-center font-black text-slate-400 text-xl shadow-inner group-hover:bg-indigo-50 transition-all">{p.avatar ? <img src={p.avatar} className="w-full h-full object-cover rounded-[20px]" /> : p.name[0]}</div>
+                        <div className="flex-1">
+                          <p className="text-sm font-black text-slate-800">{p.name} {p.id === currentUser.id && <span className="text-[8px] font-black bg-indigo-600 text-white px-2 py-0.5 rounded-full ml-2">EU</span>}</p>
+                          <p className="text-[10px] uppercase text-indigo-500 font-black tracking-widest">{p.role}</p>
                         </div>
-                      ))}
-                      <button 
-                        onClick={addProfile}
-                        className="p-8 rounded-[32px] border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-3 hover:bg-slate-100 transition-all text-slate-400 group"
-                      >
-                        <UserPlus size={32} className="group-hover:scale-110 transition-transform" />
-                        <span className="text-xs font-black uppercase tracking-widest">Acrescentar ao Legado</span>
-                      </button>
-                   </div>
+                     </div>
+                   ))}
                 </div>
              )}
 
              {familySubView === 'rules' && (
                 <div className="space-y-4">
-                   <div className="bg-slate-900 text-white p-6 rounded-3xl shadow-xl border border-slate-800">
-                      <div className="flex items-center gap-3 mb-4">
-                        <Gavel className="text-indigo-400" size={24} />
-                        <h2 className="text-lg font-black tracking-tight">Regras da Casa</h2>
-                      </div>
-                      <p className="text-[11px] text-slate-400 leading-relaxed italic">
-                        "Estes pactos definem a ordem de nosso lar. Sem regras claras, a confusão se instala."
-                      </p>
+                   <div className="p-8 bg-slate-900 text-white rounded-[40px] border border-white/5 relative overflow-hidden text-center mb-2">
+                      <ScrollText size={40} className="mx-auto mb-4 text-indigo-400" />
+                      <h3 className="text-xl font-black mb-1">A Constituição</h3>
+                      <p className="text-[10px] text-slate-400 uppercase tracking-widest font-black opacity-60">Princípios Fundamentais</p>
                    </div>
-
-                   <div className="space-y-3">
-                      {rules.map(rule => (
-                        <div key={rule.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex gap-4 group transition-all hover:shadow-md">
-                           <span className="text-2xl pt-1">{rule.icon}</span>
-                           <div className="flex-1">
-                              <div className="flex justify-between items-start">
-                                 <h3 className="text-sm font-bold text-slate-800">{rule.title}</h3>
-                                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button onClick={() => {
-                                      const newT = prompt("Novo título:", rule.title);
-                                      if (newT) setRules(rules.map(r => r.id === rule.id ? {...r, title: newT} : r));
-                                    }} className="p-1 text-slate-300 hover:text-indigo-600"><Edit3 size={14}/></button>
-                                    <button onClick={() => {
-                                       if(confirm("Remover regra?")) setRules(rules.filter(r => r.id !== rule.id));
-                                    }} className="p-1 text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>
-                                 </div>
-                              </div>
-                              <p className="text-[11px] text-slate-400 mt-1 leading-snug">{rule.description}</p>
-                           </div>
+                   {familyRules.map(r => (
+                     <div key={r.id} className="p-6 bg-white rounded-[32px] border border-slate-100 shadow-sm relative group">
+                        <div className="flex justify-between items-start mb-3">
+                          <h4 className="text-sm font-black text-slate-800 leading-tight pr-6">{r.title}</h4>
+                          <button onClick={() => setRules(rules.filter(rule => rule.id !== r.id))} className="text-slate-100 group-hover:text-red-300 transition-colors"><Trash2 size={16}/></button>
                         </div>
-                      ))}
-                   </div>
-
-                   <button 
-                     onClick={addRule}
-                     className="w-full py-4 border-2 border-dashed border-slate-200 rounded-3xl text-[10px] font-bold text-slate-400 uppercase tracking-widest hover:bg-slate-100 transition-colors"
-                   >
-                      + Adicionar Novo Pacto
-                   </button>
-                </div>
-             )}
-
-             {familySubView === 'duties' && (
-                <div className="space-y-4">
-                   <div className="bg-emerald-700 text-white p-6 rounded-3xl shadow-xl border border-emerald-600">
-                      <div className="flex items-center gap-3 mb-2">
-                        <ListChecks className="text-emerald-200" size={24} />
-                        <h2 className="text-lg font-black tracking-tight">Matriz de Deveres</h2>
-                      </div>
-                      <p className="text-[11px] text-emerald-100/70">
-                        Divisão clara de responsabilidades domésticas para manter a ordem do lar.
-                      </p>
-                   </div>
-
-                   <div className="space-y-3">
-                      {responsibilities.map(res => {
-                        const assignedTo = profiles.find(p => p.id === res.assignedProfileId);
-                        const isGlobal = res.assignedProfileId === 'family';
-                        
-                        return (
-                          <div key={res.id} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between group transition-all hover:shadow-md">
-                             <div className="flex-1">
-                                <h3 className="text-sm font-bold text-slate-800">{res.title}</h3>
-                                <div className="flex flex-wrap gap-2 mt-2">
-                                   <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-100">{res.frequency}</span>
-                                   <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full border ${isGlobal ? 'bg-slate-900 text-white border-slate-800' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>
-                                      {isGlobal ? 'Família Inteira' : `Resp: ${assignedTo?.name || 'Inexistente'}`}
-                                   </span>
-                                </div>
-                             </div>
-                             <div className="flex items-center gap-3">
-                                <button onClick={() => {
-                                   if(confirm("Remover dever?")) setResponsibilities(responsibilities.filter(r => r.id !== res.id));
-                                }} className="p-2 text-slate-200 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={16}/></button>
-                                <div className={`w-10 h-10 rounded-2xl flex items-center justify-center font-black text-xs shadow-sm border ${isGlobal ? 'bg-slate-900 text-white border-slate-800' : 'bg-slate-50 text-slate-400 border-slate-100 overflow-hidden'}`}>
-                                   {isGlobal ? <Users size={16}/> : (assignedTo?.avatar ? <img src={assignedTo.avatar} className="w-full h-full object-cover" /> : (assignedTo?.name[0] || '?'))}
-                                </div>
-                             </div>
-                          </div>
-                        );
-                      })}
-                   </div>
-
-                   <button 
-                     onClick={addDuty}
-                     className="w-full py-4 border-2 border-dashed border-slate-200 rounded-3xl text-[10px] font-bold text-slate-400 uppercase tracking-widest hover:bg-slate-100 transition-colors"
-                   >
-                      + Designar Novo Dever
-                   </button>
+                        <p className="text-xs text-slate-500 leading-relaxed font-medium">{r.description}</p>
+                     </div>
+                   ))}
+                   <button onClick={() => {
+                     const t = prompt("Título do Pacto:");
+                     if(t) setRules([...rules, { id: Date.now().toString(), title: t, description: prompt("Descrição do dever:") || '', icon: '📜', familyId: currentUser.familyId }]);
+                   }} className="w-full py-6 border-2 border-dashed border-slate-200 rounded-[32px] text-slate-400 font-black text-[10px] uppercase tracking-widest hover:border-indigo-300 hover:text-indigo-500 transition-all">+ Novo Artigo</button>
                 </div>
              )}
           </div>
         )}
 
         {view === ViewMode.AI && (
-          <div className="flex flex-col h-full space-y-5 animate-fadeIn">
-             {aiChat.length === 0 && (
-               <div className="bg-slate-900 text-white p-8 rounded-[40px] shadow-2xl relative overflow-hidden">
-                 <div className="absolute top-0 right-0 p-8 opacity-5"><Sparkles size={120}/></div>
-                 <h2 className="text-2xl font-black mb-3">Mentor de Disciplina</h2>
-                 <p className="text-sm text-slate-400 leading-relaxed mb-8">
-                   "A ordem é a primeira lei do céu." <br/> Como estruturamos sua ordem hoje, {activeProfile.name.split(' ')[0]}?
-                 </p>
-                 <div className="space-y-2">
-                    {["Resuma meu dia", "Como melhorar a ordem familiar?", "Sugira um pacto para a casa"].map(q => (
-                      <button key={q} onClick={() => setInputText(q)} className="w-full text-left text-[11px] font-bold bg-slate-800 p-3 rounded-2xl hover:bg-indigo-600 transition-all text-slate-300">
-                        {q}
+          <div className="flex flex-col h-full space-y-4 animate-fadeIn">
+             {/* ... AI Code preserved ... */}
+             <div className="bg-slate-900 p-8 rounded-[40px] text-white shadow-2xl relative overflow-hidden ring-1 ring-white/10">
+              <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none animate-pulse"><Sparkles size={100} /></div>
+              <h2 className="text-3xl font-black mb-1 tracking-tighter">Mentor IA</h2>
+              <p className="text-[10px] text-indigo-400 font-black uppercase tracking-[0.3em] opacity-80">Comandante de Disciplina</p>
+              <div className="mt-8 flex flex-wrap gap-2">
+                 {["Meu resumo diário", "Dicas de foco", "Plano estratégico"].map(q => (
+                   <button key={q} onClick={() => setInputText(q)} className="text-[9px] font-black bg-white/10 px-4 py-2 rounded-full hover:bg-white/20 border border-white/5 transition-all uppercase tracking-widest">{q}</button>
+                 ))}
+              </div>
+            </div>
+            
+            <div className="space-y-4 pb-24">
+              {aiChat.length === 0 && <div className="text-center py-20 opacity-20 font-black text-[10px] uppercase tracking-[0.4em]">O Mentor aguarda sua consulta</div>}
+              {aiChat.map((m, i) => (
+                <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] p-5 rounded-[32px] text-sm leading-relaxed shadow-xl border ${m.role === 'user' ? 'bg-indigo-600 text-white border-indigo-500 rounded-tr-none' : 'bg-white border-slate-100 text-slate-800 rounded-tl-none relative'}`}>
+                    {m.text}
+                    {m.role === 'model' && (
+                      <button onClick={() => speak(m.text, i.toString())} className={`absolute -bottom-2 -right-2 p-2.5 bg-white shadow-2xl border border-slate-100 rounded-full transition-all active:scale-90 ${isSpeaking === i.toString() ? 'text-indigo-600 animate-pulse ring-4 ring-indigo-50' : 'text-slate-400 hover:text-indigo-500'}`}>
+                        <Volume2 size={16} />
                       </button>
-                    ))}
-                 </div>
-               </div>
-             )}
-             <div className="flex flex-col gap-4">
-                {aiChat.map((msg, idx) => (
-                  <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[85%] p-4 rounded-3xl text-sm leading-relaxed shadow-lg ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-800 border border-slate-200 rounded-tl-none'}`}>
-                      {msg.text}
-                    </div>
+                    )}
                   </div>
-                ))}
-                {isAiLoading && (
-                  <div className="flex justify-start">
-                    <div className="bg-white px-5 py-3 rounded-3xl shadow-sm border border-slate-100 flex gap-2">
+                </div>
+              ))}
+              {isAiLoading && (
+                 <div className="flex justify-start">
+                   <div className="bg-white p-5 rounded-full shadow-lg border border-slate-100 flex gap-2">
                       <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" />
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-100" />
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-200" />
-                    </div>
-                  </div>
-                )}
+                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-75" />
+                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-150" />
+                   </div>
+                 </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {view === ViewMode.PROFILE && (
+          <div className="space-y-6 animate-fadeIn">
+             {/* ... Profile Code preserved ... */}
+             <div className="flex justify-between items-center px-2">
+               <h2 className="text-2xl font-black text-slate-900 tracking-tight">Meu Perfil</h2>
+               <UserCog size={24} className="text-indigo-500" />
              </div>
+             
+             {/* Profile Card */}
+             <div className="bg-white p-8 rounded-[40px] border border-slate-100 shadow-sm space-y-6">
+                <div className="flex flex-col items-center gap-4">
+                   <div className="w-24 h-24 bg-slate-100 rounded-[32px] flex items-center justify-center font-black text-3xl shadow-inner text-slate-300 relative group overflow-hidden border border-slate-200">
+                      {currentUser.avatar ? <img src={currentUser.avatar} className="w-full h-full object-cover" /> : currentUser.name[0]}
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white cursor-pointer"><Camera size={20}/></div>
+                   </div>
+                   <div className="text-center">
+                      <h3 className="text-xl font-black text-slate-800">{currentUser.name}</h3>
+                      <p className="text-[10px] font-black uppercase text-indigo-500 tracking-[0.2em]">{currentUser.role} • Nível {getLevel(currentUser.xp)}</p>
+                   </div>
+                </div>
+
+                {/* Level Progress */}
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                    <div className="flex justify-between text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                        <span>XP Atual: {currentUser.xp}</span>
+                        <span>Próximo: {getNextLevelXp(currentUser.xp)}</span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                        <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, (currentUser.xp / getNextLevelXp(currentUser.xp)) * 100)}%` }}></div>
+                    </div>
+                </div>
+
+                <div className="space-y-6 pt-4 border-t border-slate-50">
+                   <div className="space-y-2">
+                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Minha Identidade</label>
+                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.phrase} onChange={(e) => { const updated = {...currentUser, phrase: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
+                   </div>
+                   <div className="space-y-2">
+                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Minha Missão</label>
+                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.mission} onChange={(e) => { const updated = {...currentUser, mission: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
+                   </div>
+                   <div className="space-y-2">
+                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Visão 5 Anos</label>
+                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.vision5Years} onChange={(e) => { const updated = {...currentUser, vision5Years: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
+                   </div>
+                </div>
+             </div>
+             <button onClick={() => { setView(ViewMode.DASHBOARD); showToast('Perfil Salvo!'); }} className="w-full bg-slate-900 text-white py-5 rounded-[32px] font-black text-sm uppercase tracking-widest shadow-xl">Salvar Perfil</button>
           </div>
         )}
       </main>
+      
+      {/* Modals */}
+      {showTaskModal && renderTaskModal()}
+      {showGoalModal && renderGoalModal()}
 
-      {/* Persistent Global Input Bar */}
-      <div className="absolute bottom-24 left-0 right-0 px-6 pointer-events-none z-50">
-        <form onSubmit={handleSmartInput} className="pointer-events-auto bg-white/95 backdrop-blur-xl border border-slate-200 shadow-2xl rounded-[32px] flex items-center p-2 overflow-hidden ring-8 ring-slate-50/50 transition-all hover:ring-indigo-100/50 focus-within:ring-indigo-200/50">
-          <input 
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder={view === ViewMode.AI ? "Consulte o Mentor..." : "Adicionar dever ou estudo..."}
-            className="flex-1 bg-transparent px-5 py-3 outline-none text-sm font-medium text-slate-800 placeholder:text-slate-400"
-          />
-          <button type="submit" className="w-12 h-12 flex items-center justify-center bg-slate-900 text-white rounded-full hover:bg-black transition-all shadow-xl active:scale-95">
-            {isAiLoading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Send size={20} />}
+      {/* Floating Smart Command Center */}
+      <div className="absolute bottom-28 left-0 right-0 px-6 z-50 pointer-events-none">
+        <form onSubmit={handleSmartInput} className="bg-white/95 backdrop-blur-xl border border-slate-200 shadow-2xl rounded-full flex items-center p-2 pointer-events-auto ring-8 ring-slate-50/50">
+          <input value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder={view === ViewMode.AI ? "Consulte o Mentor..." : "Determine um dever..."} className="flex-1 bg-transparent px-5 py-3 outline-none text-sm font-bold text-slate-800" />
+          <button type="submit" className="w-12 h-12 bg-slate-900 hover:bg-black text-white rounded-full flex items-center justify-center transition-all shadow-xl active:scale-90 flex-shrink-0">
+            {isAiLoading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Send size={22} />}
           </button>
         </form>
       </div>
 
-      {/* Dock-style Bottom Navigation */}
-      <nav className="fixed bottom-0 max-w-md w-full bg-white/90 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center px-4 py-4 z-[60]">
-        <NavButton active={view === ViewMode.DASHBOARD} onClick={() => setView(ViewMode.DASHBOARD)} icon={<LayoutDashboard size={22}/>} label="Início" />
+      {/* Premium Tab Navigation */}
+      <nav className="fixed bottom-0 max-w-md w-full bg-white/95 backdrop-blur-xl border-t border-slate-200 grid grid-cols-5 py-5 z-[60] px-3 shadow-[0_-10px_40px_rgba(0,0,0,0.08)]">
+        <NavButton active={view === ViewMode.DASHBOARD} onClick={() => { setView(ViewMode.DASHBOARD); setFilterOverdue(false); }} icon={<LayoutDashboard size={22}/>} label="Home" />
         <NavButton active={view === ViewMode.AGENDA} onClick={() => setView(ViewMode.AGENDA)} icon={<Calendar size={22}/>} label="Agenda" />
-        
         <div className="flex justify-center -mt-12">
-          <button 
-            onClick={() => setView(ViewMode.AI)}
-            className={`w-16 h-16 rounded-[24px] shadow-2xl flex items-center justify-center transition-all ${view === ViewMode.AI ? 'bg-indigo-600 text-white scale-110' : 'bg-slate-900 text-white hover:bg-slate-800'}`}
-          >
-            <Sparkles size={28} />
+          <button onClick={() => { setView(ViewMode.AI); setFilterOverdue(false); }} className={`w-16 h-16 rounded-[24px] shadow-2xl flex items-center justify-center transition-all ${view === ViewMode.AI ? 'bg-indigo-600 text-white scale-110 shadow-indigo-600/40 ring-4 ring-indigo-100' : 'bg-slate-900 text-white hover:bg-black ring-4 ring-white/10'}`}>
+            <Sparkles size={30} />
           </button>
         </div>
-
-        <NavButton active={view === ViewMode.GOALS} onClick={() => setView(ViewMode.GOALS)} icon={<Target size={22}/>} label="Metas" />
-        <NavButton active={view === ViewMode.FAMILY} onClick={() => setView(ViewMode.FAMILY)} icon={<Users size={22}/>} label="Família" />
+        <NavButton active={view === ViewMode.GOALS} onClick={() => { setView(ViewMode.GOALS); setFilterOverdue(false); }} icon={<Target size={22}/>} label="Metas" />
+        <NavButton active={view === ViewMode.FAMILY} onClick={() => { setView(ViewMode.FAMILY); setFilterOverdue(false); }} icon={<Users size={22}/>} label="Legado" />
       </nav>
     </div>
   );
 };
 
-interface NavButtonProps {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}
-
-const NavButton: React.FC<NavButtonProps> = ({ active, onClick, icon, label }) => (
-  <button 
-    onClick={onClick}
-    className={`flex flex-col items-center justify-center gap-1.5 transition-all ${active ? 'text-indigo-600 font-black' : 'text-slate-400 hover:text-slate-600'}`}
-  >
-    <div className={`transition-all ${active ? 'scale-110' : 'scale-100'}`}>{icon}</div>
-    <span className={`text-[8px] font-black uppercase tracking-tighter ${active ? 'opacity-100' : 'opacity-60'}`}>{label}</span>
+const NavButton: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label: string }> = ({ active, onClick, icon, label }) => (
+  <button onClick={onClick} className={`flex flex-col items-center gap-1.5 transition-all ${active ? 'text-indigo-600' : 'text-slate-400 hover:text-indigo-400'}`}>
+    <div className={`transition-transform duration-300 ${active ? 'scale-110' : 'scale-100'}`}>{icon}</div>
+    <span className={`text-[8px] font-black uppercase tracking-tighter transition-opacity ${active ? 'opacity-100' : 'opacity-60'}`}>{label}</span>
   </button>
 );
 

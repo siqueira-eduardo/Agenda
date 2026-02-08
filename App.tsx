@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   CheckSquare, Sparkles, ChevronLeft, ChevronRight, 
   Trash2, Send, Calendar, Target, BookOpen, Users, 
@@ -7,7 +6,7 @@ import {
   Wallet, GraduationCap, Clock, Flame, UserPlus, 
   ShieldCheck, ListChecks, Gavel, Edit3, X, Save, Camera, 
   LogIn, UserCircle2, Key, Hash, Shield, ArrowRight, LogOut, Copy, Check, Volume2, Info, AlertCircle, Plus, CloudCheck, Settings, UsersRound, Trophy, ScrollText, UserCog, History, Filter, LayoutGrid, List, Repeat, 
-  Zap, PieChart, BarChart3, ChevronDown, Medal, Star, Crown
+  Zap, PieChart, BarChart3, ChevronDown, Medal, Star, Crown, StopCircle, RefreshCcw, CheckCircle2
 } from 'lucide-react';
 import { Task, ViewMode, AIChatMessage, PillarType, Profile, Goal, StudyEntry, FamilyRule, Family, ProfileRole, RecurrenceType, PriorityType, Milestone } from './types';
 import { getAIResponse, parseSmartTask, generateSpeech } from './services/geminiService';
@@ -87,18 +86,24 @@ const checkRecurrenceMatch = (baseDateStr: string, targetDateStr: string, recurr
 const App: React.FC = () => {
   // --- Auth & Data States ---
   const [families, setFamilies] = useState<Family[]>(() => {
-    const saved = JSON.parse(localStorage.getItem('legado_all_families') || '[]');
-    return saved.length > 0 ? saved : [{ id: 'fam-demo', name: 'Legado Alpha', uniqueCode: 'LEG-1234' }];
+    try {
+        const saved = JSON.parse(localStorage.getItem('legado_all_families') || '[]');
+        return saved.length > 0 ? saved : [{ id: 'fam-demo', name: 'Legado Alpha', uniqueCode: 'LEG-1234' }];
+    } catch { return [{ id: 'fam-demo', name: 'Legado Alpha', uniqueCode: 'LEG-1234' }]; }
   });
   
   const [allProfiles, setAllProfiles] = useState<Profile[]>(() => {
-    const profiles = JSON.parse(localStorage.getItem('legado_all_profiles') || '[]');
-    return profiles.map((p: any) => ({ ...p, xp: p.xp || 0, level: p.level || 1 }));
+    try {
+        const profiles = JSON.parse(localStorage.getItem('legado_all_profiles') || '[]');
+        return profiles.map((p: any) => ({ ...p, xp: p.xp || 0, level: p.level || 1 }));
+    } catch { return []; }
   });
 
   const [currentUser, setCurrentUser] = useState<Profile | null>(() => {
-    const saved = localStorage.getItem('legado_current_user');
-    return saved ? JSON.parse(saved) : null;
+    try {
+        const saved = localStorage.getItem('legado_current_user');
+        return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
   });
   
   // UI Flow States
@@ -134,19 +139,30 @@ const App: React.FC = () => {
       type: 'Curto' as 'Curto' | 'Médio' | 'Longo'
   });
 
+  // Milestone Management States
+  const [showMilestoneModal, setShowMilestoneModal] = useState(false);
+  const [milestoneTitle, setMilestoneTitle] = useState('');
+  const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+
+  // Rule Management States
+  const [showRuleModal, setShowRuleModal] = useState(false);
+  const [ruleForm, setRuleForm] = useState({ title: '', description: '' });
+
   // Functional States
   const [selectedDate, setSelectedDate] = useState<string>(formatDateLocal(new Date()));
   const [inputText, setInputText] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState<string | null>(null);
+  const [currentAudio, setCurrentAudio] = useState<AudioBufferSourceNode | null>(null);
   const [filterOverdue, setFilterOverdue] = useState(false);
   const [notification, setNotification] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   
   // Data States
-  const [tasks, setTasks] = useState<Task[]>(() => JSON.parse(localStorage.getItem('legado_tasks') || '[]'));
-  const [goals, setGoals] = useState<Goal[]>(() => JSON.parse(localStorage.getItem('legado_goals') || '[]'));
-  const [rules, setRules] = useState<FamilyRule[]>(() => JSON.parse(localStorage.getItem('legado_rules') || '[]'));
+  const [tasks, setTasks] = useState<Task[]>(() => { try { return JSON.parse(localStorage.getItem('legado_tasks') || '[]') } catch { return [] }});
+  const [goals, setGoals] = useState<Goal[]>(() => { try { return JSON.parse(localStorage.getItem('legado_goals') || '[]') } catch { return [] }});
+  const [rules, setRules] = useState<FamilyRule[]>(() => { try { return JSON.parse(localStorage.getItem('legado_rules') || '[]') } catch { return [] }});
   const [aiChat, setAiChat] = useState<AIChatMessage[]>([]);
 
   // Feedback States
@@ -166,19 +182,46 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [families, allProfiles, currentUser, tasks, goals, rules]);
 
+  // Notification Timer
   useEffect(() => {
     if (notification) {
-      const t = setTimeout(() => setNotification(null), 3000);
+      const t = setTimeout(() => setNotification(null), 4000);
       return () => clearTimeout(t);
     }
   }, [notification]);
+
+  // Scroll Chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [aiChat]);
+
+  const activeFamily = useMemo(() => families.find(f => f.id === currentUser?.familyId), [families, currentUser]);
+  const todayStr = useMemo(() => formatDateLocal(new Date()), []);
+
+  // Alert System Logic (Overdue/Upcoming)
+  useEffect(() => {
+    if (currentUser && view === ViewMode.DASHBOARD) {
+        const overdueCount = tasks.filter(t => t.profileId === currentUser.id && !t.completed && t.date < todayStr).length;
+        const todayCount = tasks.filter(t => t.profileId === currentUser.id && !t.completed && t.date === todayStr).length;
+
+        if (overdueCount > 0) {
+            const timer = setTimeout(() => {
+                setNotification({ msg: `Atenção: ${overdueCount} deveres atrasados!`, type: 'error' });
+            }, 1000);
+            return () => clearTimeout(timer);
+        } else if (todayCount > 0) {
+            const timer = setTimeout(() => {
+                setNotification({ msg: `Foco: ${todayCount} missões para hoje.`, type: 'success' });
+            }, 1000);
+            return () => clearTimeout(timer);
+        }
+    }
+  }, [currentUser, view, tasks.length]);
 
   useEffect(() => {
     if (currentUser && !selectedMemberId) setSelectedMemberId(currentUser.id);
   }, [currentUser]);
 
-  const activeFamily = useMemo(() => families.find(f => f.id === currentUser?.familyId), [families, currentUser]);
-  const todayStr = useMemo(() => formatDateLocal(new Date()), []);
   const familyMembers = useMemo(() => allProfiles.filter(p => p.familyId === currentUser?.familyId), [allProfiles, currentUser]);
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
@@ -188,23 +231,21 @@ const App: React.FC = () => {
   const getFilteredTasks = (dateStr: string, memberId: string) => {
     const familyMemberIds = new Set(familyMembers.map(m => m.id));
 
-    // 1. Real tasks for this date
+    // 1. Real tasks
     let realTasks = tasks.filter(t => {
       if (!familyMemberIds.has(t.profileId)) return false;
       if (t.date !== dateStr) return false;
       return t.profileId === memberId || t.isFamilyTask;
     });
 
-    // 2. Virtual projected tasks
+    // 2. Virtual tasks
     let virtualTasks = tasks.filter(t => {
       if (!familyMemberIds.has(t.profileId)) return false;
       if (t.completed) return false;
       if (!t.recurrence) return false;
       if (t.date >= dateStr) return false;
-      
       const isOwner = t.profileId === memberId || t.isFamilyTask;
       if (!isOwner) return false;
-
       return checkRecurrenceMatch(t.date, dateStr, t.recurrence);
     }).map(t => ({
       ...t,
@@ -224,11 +265,16 @@ const App: React.FC = () => {
       allTasks = allTasks.filter(t => t.pillar === categoryFilter);
     }
     
+    // Improved Sorting: Priority > Time > Title
     return allTasks.sort((a, b) => {
       const prioMap = { 'Alta': 0, 'Média': 1, 'Baixa': 2 };
       if (prioMap[a.priority] !== prioMap[b.priority]) return prioMap[a.priority] - prioMap[b.priority];
+      
       if (a.time && b.time) return a.time.localeCompare(b.time);
-      return 0;
+      if (a.time && !b.time) return -1;
+      if (!a.time && b.time) return 1;
+
+      return a.title.localeCompare(b.title);
     });
   };
 
@@ -259,10 +305,8 @@ const App: React.FC = () => {
 
     const hour = new Date().getHours();
     const greeting = hour < 12 ? 'Bom dia' : hour < 18 ? 'Boa tarde' : 'Boa noite';
-    const currentLevel = getLevel(currentUser.xp);
-    const nextLevelXp = getNextLevelXp(currentUser.xp);
 
-    return { todayTasks, total, completed, progress, nextTask, pillarCounts, greeting, currentLevel, nextLevelXp };
+    return { todayTasks, total, completed, progress, nextTask, pillarCounts, greeting };
   }, [tasks, currentUser, todayStr, categoryFilter]);
 
   const calendarDays = useMemo(() => {
@@ -275,7 +319,7 @@ const App: React.FC = () => {
     for (let i = 0; i < firstDayOfMonth; i++) days.push(null);
     for (let i = 1; i <= daysInMonth; i++) {
       const d = new Date(year, month, i);
-      const ds = formatDateLocal(d); // Usa função segura para timezone
+      const ds = formatDateLocal(d); 
       const dayTasks = getFilteredTasks(ds, selectedMemberId);
       
       let status: 'none' | 'done' | 'partial' | 'pending' = 'none';
@@ -323,7 +367,8 @@ const App: React.FC = () => {
       phrase: 'Foco no progresso.',
       mission: 'Desenvolver disciplina e gerar valor.',
       xp: 0,
-      level: 1
+      level: 1,
+      avatar: ''
     };
     setAllProfiles([...allProfiles, newProfile]);
     setCurrentUser(newProfile);
@@ -435,7 +480,6 @@ const App: React.FC = () => {
 
   const handleSaveTask = () => {
     if (!taskForm.title.trim() || !currentUser) return;
-
     const xp = taskForm.priority === 'Alta' ? 50 : taskForm.priority === 'Média' ? 30 : 15;
 
     if (editingTask) {
@@ -493,15 +537,35 @@ const App: React.FC = () => {
     showToast('Objetivo fundado!', 'success');
   };
 
+  const handleFinishGoal = (goal: Goal) => {
+    if (!currentUser) return;
+    const xpReward = goal.type === 'Longo' ? 1000 : goal.type === 'Médio' ? 500 : 250;
+    
+    const updatedProfiles = allProfiles.map(p => {
+        if (p.id === currentUser.id) {
+            const newXp = p.xp + xpReward;
+            return { ...p, xp: newXp, level: getLevel(newXp) };
+        }
+        return p;
+    });
+    
+    setAllProfiles(updatedProfiles);
+    setCurrentUser(updatedProfiles.find(p => p.id === currentUser.id) || null);
+    
+    // Remove the goal (Archive it)
+    setGoals(goals.filter(g => g.id !== goal.id));
+    
+    showToast(`MISSÃO CUMPRIDA! +${xpReward} XP`, 'success');
+    speak(`Parabéns! O objetivo ${goal.title} foi conquistado com honra.`, 'goal-finish');
+  };
+
   const getNextDate = (current: string, type: RecurrenceType) => {
     const [y, m, d] = current.split('-').map(Number);
     const date = new Date(y, m - 1, d);
-    
     if (type === 'Diário') date.setDate(date.getDate() + 1);
     if (type === 'Semanal') date.setDate(date.getDate() + 7);
     if (type === 'Mensal') date.setMonth(date.getMonth() + 1);
     if (type === 'Anual') date.setFullYear(date.getFullYear() + 1);
-  
     return formatDateLocal(date);
   };
 
@@ -510,7 +574,6 @@ const App: React.FC = () => {
         showToast('Complete a tarefa original anterior primeiro.', 'error');
         return;
     }
-
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
@@ -561,32 +624,69 @@ const App: React.FC = () => {
         newTasksList = [...newTasksList, newTask];
         showToast('Próxima recorrência agendada');
     }
-
     setTasks(newTasksList);
   };
 
-  const addMilestone = (goalId: string) => {
-    const text = prompt("Nome do marco:");
-    if (!text) return;
-    setGoals(goals.map(g => g.id === goalId ? { ...g, milestones: [...(g.milestones || []), { id: Date.now().toString(), title: text, completed: false }] } : g));
-  };
+  // Milestone Logic
+  const openMilestoneModal = (goalId: string) => {
+    setSelectedGoalId(goalId);
+    setMilestoneTitle('');
+    setShowMilestoneModal(true);
+  }
+
+  const handleSaveMilestone = () => {
+    if (!milestoneTitle.trim() || !selectedGoalId) return;
+    setGoals(goals.map(g => g.id === selectedGoalId ? { ...g, milestones: [...(g.milestones || []), { id: Date.now().toString(), title: milestoneTitle, completed: false }] } : g));
+    setShowMilestoneModal(false);
+    showToast('Marco adicionado!', 'success');
+  }
 
   const toggleMilestone = (goalId: string, msId: string) => {
     setGoals(goals.map(g => {
         if (g.id !== goalId) return g;
         const newMs = g.milestones?.map(m => m.id === msId ? { ...m, completed: !m.completed } : m) || [];
+        // Auto Calculate Progress based on Milestones
         const completedCount = newMs.filter(m => m.completed).length;
         const progress = newMs.length > 0 ? Math.round((completedCount / newMs.length) * 100) : g.progress;
         return { ...g, milestones: newMs, progress };
     }));
   };
 
+  // Rules Logic
+  const openRuleModal = () => {
+    setRuleForm({ title: '', description: '' });
+    setShowRuleModal(true);
+  }
+
+  const handleSaveRule = () => {
+    if (!ruleForm.title.trim() || !currentUser) return;
+    setRules([...rules, { 
+      id: Date.now().toString(), 
+      title: ruleForm.title, 
+      description: ruleForm.description, 
+      icon: '📜', 
+      familyId: currentUser.familyId 
+    }]);
+    setShowRuleModal(false);
+    showToast('Nova lei decretada!', 'success');
+  }
+
   const speak = async (text: string, id: string) => {
-    if (isSpeaking) return;
+    if (isSpeaking) {
+        if(currentAudio) { currentAudio.stop(); }
+        setIsSpeaking(null);
+        setCurrentAudio(null);
+        if (isSpeaking === id) return; // Toggle off if clicking same button
+    }
     setIsSpeaking(id);
-    const audio = await generateSpeech(text);
-    if (audio) { audio.onended = () => setIsSpeaking(null); audio.start(); }
-    else setIsSpeaking(null);
+    const source = await generateSpeech(text);
+    if (source) { 
+        setCurrentAudio(source);
+        source.onended = () => { setIsSpeaking(null); setCurrentAudio(null); }; 
+        source.start(); 
+    } else {
+        setIsSpeaking(null);
+    }
   };
 
   // --- Renderers ---
@@ -648,7 +748,7 @@ const App: React.FC = () => {
           </div>
 
           <div>
-             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Frequência (Recorrência)</label>
+             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Frequência</label>
              <div className="flex flex-wrap gap-2">
                <button onClick={() => setTaskForm({...taskForm, recurrence: undefined})} className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wide border transition-all ${!taskForm.recurrence ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}>Única</button>
                {RECURRENCE_OPTIONS.map(r => (
@@ -658,7 +758,7 @@ const App: React.FC = () => {
           </div>
 
           <div>
-             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Pilar de Desenvolvimento</label>
+             <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Pilar</label>
              <div className="flex flex-wrap gap-2">
                {PILLAR_OPTIONS.map(p => (
                  <button key={p} onClick={() => setTaskForm({...taskForm, pillar: p})} className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wide border transition-all ${taskForm.pillar === p ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-200'}`}>{p}</button>
@@ -710,6 +810,46 @@ const App: React.FC = () => {
                  </select>
             </div>
             <button onClick={handleSaveGoal} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg active:scale-95 transition-transform mt-2">Fundar Objetivo</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderMilestoneModal = () => (
+    <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 animate-fadeIn">
+      <div className="bg-white w-full max-w-sm rounded-[32px] p-6 shadow-2xl animate-slideUp">
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-lg font-black text-slate-900">Novo Marco</h3>
+          <button onClick={() => setShowMilestoneModal(false)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={20} className="text-slate-500"/></button>
+        </div>
+        <div className="space-y-4">
+            <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Título do Marco</label>
+                <input value={milestoneTitle} onChange={e => setMilestoneTitle(e.target.value)} placeholder="Ex: Ler capítulo 1" className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 px-5 outline-none focus:border-indigo-500 font-bold text-sm text-slate-800" autoFocus />
+            </div>
+            <button onClick={handleSaveMilestone} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg active:scale-95 transition-transform mt-2">Adicionar Marco</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderRuleModal = () => (
+    <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 animate-fadeIn">
+      <div className="bg-white w-full max-w-sm rounded-[32px] p-6 shadow-2xl animate-slideUp">
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-lg font-black text-slate-900">Nova Lei Familiar</h3>
+          <button onClick={() => setShowRuleModal(false)} className="p-2 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={20} className="text-slate-500"/></button>
+        </div>
+        <div className="space-y-4">
+            <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Título da Lei</label>
+                <input value={ruleForm.title} onChange={e => setRuleForm({...ruleForm, title: e.target.value})} placeholder="Ex: Respeito Mútuo" className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 px-5 outline-none focus:border-indigo-500 font-bold text-sm text-slate-800" autoFocus />
+            </div>
+            <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Descrição</label>
+                <textarea value={ruleForm.description} onChange={e => setRuleForm({...ruleForm, description: e.target.value})} placeholder="Ex: Não levantar a voz em discussões." className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 px-5 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800 min-h-[80px]" />
+            </div>
+            <button onClick={handleSaveRule} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg active:scale-95 transition-transform mt-2">Decretar Lei</button>
         </div>
       </div>
     </div>
@@ -785,19 +925,19 @@ const App: React.FC = () => {
   // --- Main Render ---
 
   if (!currentUser || (currentUser && !currentUser.familyId && authMode === 'family-choice')) {
-    // Auth screens (Login/Signup/Family) - Same as before but with toast support
     return (
       <div className="max-w-md mx-auto h-screen bg-slate-900 flex flex-col p-8 text-white relative overflow-hidden">
         {notification && (
-            <div className={`fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-xl z-[100] font-black text-xs uppercase tracking-wider animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}`}>
-                {notification.msg}
+            <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : 'bg-red-500/90 border-red-400 text-white'}`}>
+                {notification.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+                <span className="flex-1">{notification.msg}</span>
+                <button onClick={() => setNotification(null)} className="hover:bg-white/20 p-1 rounded-full transition-colors"><X size={14} /></button>
             </div>
         )}
         <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none">
           <div className="absolute top-[-10%] left-[-10%] w-[80%] h-[80%] bg-indigo-600 rounded-full blur-[150px]" />
           <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-emerald-600 rounded-full blur-[150px]" />
         </div>
-        {/* ... (Auth content preserved structure) ... */}
         <div className="relative z-10 flex flex-col h-full justify-center space-y-8 animate-fadeIn">
           <div className="text-center space-y-3">
              <div className="w-20 h-20 bg-indigo-600 rounded-[30px] mx-auto flex items-center justify-center shadow-2xl shadow-indigo-600/30 mb-4 rotate-3 border border-white/10">
@@ -863,16 +1003,17 @@ const App: React.FC = () => {
   return (
     <div className="max-w-md mx-auto h-screen bg-slate-50 flex flex-col shadow-2xl overflow-hidden relative border-x border-slate-200">
       
-      {/* Notifications */}
+      {/* Improved Notification Toast */}
       {notification && (
-        <div className={`fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-xl z-[100] font-black text-xs uppercase tracking-wider animate-slideDown flex items-center gap-2 ${notification.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'}`}>
-            {notification.type === 'success' ? <Check size={14} /> : <AlertCircle size={14} />}
-            {notification.msg}
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : 'bg-red-500/90 border-red-400 text-white'}`}>
+            {notification.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+            <span className="flex-1">{notification.msg}</span>
+            <button onClick={() => setNotification(null)} className="hover:bg-white/20 p-1 rounded-full transition-colors"><X size={14} /></button>
         </div>
       )}
 
       {/* Universal Header */}
-      <header className="p-5 bg-slate-900 text-white flex justify-between items-center sticky top-0 z-50">
+      <header className="p-5 bg-slate-900 text-white flex justify-between items-center sticky top-0 z-50 shadow-lg shadow-indigo-900/10">
         <div className="flex items-center gap-3">
           <button onClick={() => { setView(ViewMode.PROFILE); setFilterOverdue(false); }} className="w-10 h-10 rounded-[12px] bg-indigo-500 flex items-center justify-center font-black shadow-inner border border-white/10 overflow-hidden relative group">
             {currentUser.avatar ? <img src={currentUser.avatar} className="w-full h-full object-cover" /> : currentUser.name[0]}
@@ -894,11 +1035,9 @@ const App: React.FC = () => {
         
         {view === ViewMode.DASHBOARD && dashboardData && (
           <div className="space-y-6 animate-fadeIn">
-            
-            {/* HERO: Status do Dia & Próxima Missão */}
+            {/* HERO */}
             <div className="bg-gradient-to-br from-indigo-900 to-slate-900 rounded-[40px] p-8 text-white shadow-2xl relative overflow-hidden ring-1 ring-white/10">
               <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none"><ShieldCheck size={140} /></div>
-              
               <div className="relative z-10">
                 <div className="flex justify-between items-start mb-6">
                    <div>
@@ -914,7 +1053,6 @@ const App: React.FC = () => {
                    </div>
                 </div>
 
-                {/* Progress Circle & Next Task */}
                 <div className="flex items-center gap-6">
                    <div className="relative w-20 h-20 flex-shrink-0 flex items-center justify-center group">
                       <svg className="w-full h-full -rotate-90">
@@ -952,7 +1090,7 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Actions Row */}
+            {/* Quick Actions */}
             <div className="grid grid-cols-3 gap-3">
                <button onClick={() => openTaskModal()} className="bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm flex flex-col items-center gap-2 hover:border-indigo-200 transition-colors group active:scale-95">
                   <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform"><CheckSquare size={20}/></div>
@@ -968,7 +1106,7 @@ const App: React.FC = () => {
                </button>
             </div>
 
-            {/* Pillar Distribution (Daily Focus) */}
+            {/* Daily Focus */}
             <div className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
                <div className="flex justify-between items-center mb-4">
                   <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest flex items-center gap-2"><PieChart size={14} className="text-indigo-500"/> Foco do Dia</h3>
@@ -1034,7 +1172,7 @@ const App: React.FC = () => {
                         <div className="flex items-center flex-wrap gap-2 mt-1">
                           <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full ${PILLAR_COLORS[t.pillar]}`}>{t.pillar}</span>
                           <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full border ${PRIORITY_COLORS[t.priority]}`}>{t.priority}</span>
-                          {t.time && <span className="text-[9px] font-black text-slate-400 flex items-center gap-1"><Clock size={10}/> {t.time}</span>}
+                          {t.time && <span className="text-[9px] font-black text-slate-400 flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 rounded"><Clock size={10}/> {t.time}</span>}
                           {t.recurrence && <span className="text-[9px] font-black text-indigo-500 flex items-center gap-1"><Repeat size={10}/> {t.recurrence}</span>}
                         </div>
                       </div>
@@ -1061,33 +1199,48 @@ const App: React.FC = () => {
                <Trophy size={24} className="text-amber-500" />
             </div>
             <div className="space-y-4">
-               {activeGoals.map(g => (
-                 <div key={g.id} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm space-y-4 relative group">
-                    <button onClick={() => setGoals(goals.filter(goal => goal.id !== g.id))} className="absolute top-4 right-4 text-slate-200 hover:text-red-400 transition-colors"><Trash2 size={16}/></button>
-                    <div className="flex justify-between items-start pr-8">
+               {activeGoals.map(g => {
+                 const isCompleted = g.progress === 100;
+                 return (
+                 <div key={g.id} className={`bg-white p-6 rounded-[32px] border shadow-sm space-y-4 relative group transition-all ${isCompleted ? 'border-emerald-200 bg-emerald-50/50' : 'border-slate-100'}`}>
+                    <div className="absolute top-4 right-4 flex gap-2">
+                         {!g.milestones?.length && !isCompleted && (
+                            <button onClick={() => handleFinishGoal(g)} className="text-slate-300 hover:text-emerald-500 transition-colors p-1" title="Concluir sem marcos"><CheckCircle2 size={18}/></button>
+                         )}
+                         <button onClick={() => setGoals(goals.filter(goal => goal.id !== g.id))} className="text-slate-200 hover:text-red-400 transition-colors p-1"><Trash2 size={16}/></button>
+                    </div>
+                    
+                    <div className="flex justify-between items-start pr-12">
                        <div>
                           <h3 className="text-sm font-black text-slate-800">{g.title}</h3>
                           <p className="text-[9px] font-black uppercase text-indigo-500 tracking-widest mt-1">{g.type} Prazo • {g.milestones?.length || 0} Marcos</p>
                        </div>
-                       <span className="text-[10px] font-black text-slate-400">{g.progress}%</span>
+                       <span className={`text-[10px] font-black ${isCompleted ? 'text-emerald-600' : 'text-slate-400'}`}>{g.progress}%</span>
                     </div>
+                    
                     <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                       <div className="h-full bg-gradient-to-r from-indigo-500 to-indigo-700 transition-all duration-1000" style={{ width: `${g.progress}%` }} />
+                       <div className={`h-full transition-all duration-1000 ${isCompleted ? 'bg-emerald-500' : 'bg-gradient-to-r from-indigo-500 to-indigo-700'}`} style={{ width: `${g.progress}%` }} />
                     </div>
-                    {/* Milestones Area */}
-                    <div className="pt-4 border-t border-slate-50 space-y-2">
-                        {g.milestones?.map(m => (
-                            <div key={m.id} onClick={() => toggleMilestone(g.id, m.id)} className="flex items-center gap-2 cursor-pointer opacity-80 hover:opacity-100">
-                                <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${m.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300'}`}>
-                                    {m.completed && <Check size={10} />}
+
+                    {isCompleted ? (
+                        <button onClick={() => handleFinishGoal(g)} className="w-full py-4 bg-emerald-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-emerald-500/30 active:scale-95 transition-transform flex items-center justify-center gap-2 animate-pulse">
+                            <Trophy size={16} /> Resgatar Recompensa
+                        </button>
+                    ) : (
+                        <div className="pt-4 border-t border-slate-50 space-y-2">
+                            {g.milestones?.map(m => (
+                                <div key={m.id} onClick={() => toggleMilestone(g.id, m.id)} className="flex items-center gap-2 cursor-pointer opacity-80 hover:opacity-100">
+                                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${m.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300'}`}>
+                                        {m.completed && <Check size={10} />}
+                                    </div>
+                                    <span className={`text-xs font-medium ${m.completed ? 'line-through text-slate-300' : 'text-slate-600'}`}>{m.title}</span>
                                 </div>
-                                <span className={`text-xs font-medium ${m.completed ? 'line-through text-slate-300' : 'text-slate-600'}`}>{m.title}</span>
-                            </div>
-                        ))}
-                        <button onClick={() => addMilestone(g.id)} className="text-[9px] font-bold text-indigo-400 flex items-center gap-1 hover:text-indigo-600 mt-2">+ Adicionar Marco</button>
-                    </div>
+                            ))}
+                            <button onClick={() => openMilestoneModal(g.id)} className="text-[9px] font-bold text-indigo-400 flex items-center gap-1 hover:text-indigo-600 mt-2 p-2 hover:bg-indigo-50 rounded-xl transition-colors w-full justify-center border border-dashed border-indigo-100">+ Adicionar Marco</button>
+                        </div>
+                    )}
                  </div>
-               ))}
+               )})}
                <button onClick={openGoalModal} className="w-full py-8 border-2 border-dashed border-slate-200 rounded-[32px] text-slate-400 font-black text-[10px] uppercase tracking-widest hover:border-indigo-300 hover:text-indigo-500 transition-all">+ Fundar Novo Objetivo</button>
             </div>
           </div>
@@ -1095,7 +1248,6 @@ const App: React.FC = () => {
 
         {view === ViewMode.FAMILY && (
           <div className="space-y-6 animate-fadeIn">
-             {/* ... Family code preserved ... */}
              <div className="flex gap-2 p-1.5 bg-slate-200/50 rounded-[24px] border border-slate-200/20">
                 <button onClick={() => setFamilySubView('ranking')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-2xl transition-all ${familySubView === 'ranking' ? 'bg-white shadow-lg text-slate-900' : 'text-slate-500'}`}>Ranking</button>
                 <button onClick={() => setFamilySubView('members')} className={`flex-1 py-3 text-[10px] font-black uppercase rounded-2xl transition-all ${familySubView === 'members' ? 'bg-white shadow-lg text-slate-900' : 'text-slate-500'}`}>Membros</button>
@@ -1159,143 +1311,88 @@ const App: React.FC = () => {
                         <p className="text-xs text-slate-500 leading-relaxed font-medium">{r.description}</p>
                      </div>
                    ))}
-                   <button onClick={() => {
-                     const t = prompt("Título do Pacto:");
-                     if(t) setRules([...rules, { id: Date.now().toString(), title: t, description: prompt("Descrição do dever:") || '', icon: '📜', familyId: currentUser.familyId }]);
-                   }} className="w-full py-6 border-2 border-dashed border-slate-200 rounded-[32px] text-slate-400 font-black text-[10px] uppercase tracking-widest hover:border-indigo-300 hover:text-indigo-500 transition-all">+ Novo Artigo</button>
+                   <button onClick={openRuleModal} className="w-full py-6 border-2 border-dashed border-slate-200 rounded-[32px] text-slate-400 font-black text-[10px] uppercase tracking-widest hover:border-indigo-300 hover:text-indigo-500 transition-all">+ Novo Artigo</button>
                 </div>
              )}
           </div>
         )}
 
         {view === ViewMode.AI && (
-          <div className="flex flex-col h-full space-y-4 animate-fadeIn">
-             {/* ... AI Code preserved ... */}
-             <div className="bg-slate-900 p-8 rounded-[40px] text-white shadow-2xl relative overflow-hidden ring-1 ring-white/10">
-              <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none animate-pulse"><Sparkles size={100} /></div>
-              <h2 className="text-3xl font-black mb-1 tracking-tighter">Mentor IA</h2>
-              <p className="text-[10px] text-indigo-400 font-black uppercase tracking-[0.3em] opacity-80">Comandante de Disciplina</p>
-              <div className="mt-8 flex flex-wrap gap-2">
-                 {["Meu resumo diário", "Dicas de foco", "Plano estratégico"].map(q => (
-                   <button key={q} onClick={() => setInputText(q)} className="text-[9px] font-black bg-white/10 px-4 py-2 rounded-full hover:bg-white/20 border border-white/5 transition-all uppercase tracking-widest">{q}</button>
-                 ))}
-              </div>
-            </div>
-            
-            <div className="space-y-4 pb-24">
-              {aiChat.length === 0 && <div className="text-center py-20 opacity-20 font-black text-[10px] uppercase tracking-[0.4em]">O Mentor aguarda sua consulta</div>}
-              {aiChat.map((m, i) => (
-                <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] p-5 rounded-[32px] text-sm leading-relaxed shadow-xl border ${m.role === 'user' ? 'bg-indigo-600 text-white border-indigo-500 rounded-tr-none' : 'bg-white border-slate-100 text-slate-800 rounded-tl-none relative'}`}>
-                    {m.text}
-                    {m.role === 'model' && (
-                      <button onClick={() => speak(m.text, i.toString())} className={`absolute -bottom-2 -right-2 p-2.5 bg-white shadow-2xl border border-slate-100 rounded-full transition-all active:scale-90 ${isSpeaking === i.toString() ? 'text-indigo-600 animate-pulse ring-4 ring-indigo-50' : 'text-slate-400 hover:text-indigo-500'}`}>
-                        <Volume2 size={16} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {isAiLoading && (
-                 <div className="flex justify-start">
-                   <div className="bg-white p-5 rounded-full shadow-lg border border-slate-100 flex gap-2">
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce" />
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-75" />
-                      <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-150" />
-                   </div>
+             <div className="space-y-4 animate-fadeIn p-4">
+                 <div className="bg-white p-4 rounded-[32px] border border-slate-100 shadow-sm h-[400px] overflow-y-auto flex flex-col gap-3">
+                     {aiChat.length === 0 && (
+                         <div className="flex-1 flex flex-col items-center justify-center text-center opacity-40">
+                             <Sparkles size={48} className="mb-4 text-indigo-400"/>
+                             <p className="text-sm font-black text-slate-400">Como posso ajudar, Comandante?</p>
+                         </div>
+                     )}
+                     {aiChat.map((msg, i) => (
+                         <div key={i} className={`p-3 rounded-2xl text-xs font-medium leading-relaxed max-w-[90%] ${msg.role === 'user' ? 'bg-slate-100 self-end text-slate-800 rounded-tr-sm' : 'bg-indigo-50 text-indigo-900 self-start rounded-tl-sm'}`}>
+                             {msg.text}
+                         </div>
+                     ))}
+                     {isAiLoading && (
+                         <div className="p-3 bg-indigo-50 rounded-2xl rounded-tl-sm self-start flex gap-1">
+                             <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"/>
+                             <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-75"/>
+                             <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-150"/>
+                         </div>
+                     )}
+                     <div ref={chatEndRef} />
                  </div>
-              )}
-            </div>
-          </div>
+             </div>
         )}
 
         {view === ViewMode.PROFILE && (
-          <div className="space-y-6 animate-fadeIn">
-             {/* ... Profile Code preserved ... */}
-             <div className="flex justify-between items-center px-2">
-               <h2 className="text-2xl font-black text-slate-900 tracking-tight">Meu Perfil</h2>
-               <UserCog size={24} className="text-indigo-500" />
-             </div>
-             
-             {/* Profile Card */}
-             <div className="bg-white p-8 rounded-[40px] border border-slate-100 shadow-sm space-y-6">
-                <div className="flex flex-col items-center gap-4">
-                   <div className="w-24 h-24 bg-slate-100 rounded-[32px] flex items-center justify-center font-black text-3xl shadow-inner text-slate-300 relative group overflow-hidden border border-slate-200">
-                      {currentUser.avatar ? <img src={currentUser.avatar} className="w-full h-full object-cover" /> : currentUser.name[0]}
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white cursor-pointer"><Camera size={20}/></div>
-                   </div>
-                   <div className="text-center">
-                      <h3 className="text-xl font-black text-slate-800">{currentUser.name}</h3>
-                      <p className="text-[10px] font-black uppercase text-indigo-500 tracking-[0.2em]">{currentUser.role} • Nível {getLevel(currentUser.xp)}</p>
-                   </div>
-                </div>
-
-                {/* Level Progress */}
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <div className="flex justify-between text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                        <span>XP Atual: {currentUser.xp}</span>
-                        <span>Próximo: {getNextLevelXp(currentUser.xp)}</span>
+            <div className="space-y-6 animate-fadeIn p-4">
+                 <div className="text-center">
+                    <div className="w-24 h-24 mx-auto bg-slate-200 rounded-[32px] mb-4 relative overflow-hidden border-4 border-white shadow-xl">
+                       {currentUser.avatar ? <img src={currentUser.avatar} className="w-full h-full object-cover"/> : <div className="w-full h-full flex items-center justify-center text-4xl font-black text-slate-400">{currentUser.name[0]}</div>}
                     </div>
-                    <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
-                        <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, (currentUser.xp / getNextLevelXp(currentUser.xp)) * 100)}%` }}></div>
+                    <h2 className="text-xl font-black text-slate-800">{currentUser.name}</h2>
+                    <p className="text-xs font-bold text-indigo-500 uppercase tracking-widest mt-1">{currentUser.role} • Nível {getLevel(currentUser.xp)}</p>
+                 </div>
+                 <div className="bg-white p-6 rounded-[32px] border border-slate-100 space-y-4">
+                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest">Identidade</h3>
+                    <div>
+                       <label className="text-[10px] font-bold text-slate-400 block mb-1">Missão Pessoal</label>
+                       <p className="text-sm font-medium text-slate-800 italic">"{currentUser.mission}"</p>
                     </div>
-                </div>
-
-                <div className="space-y-6 pt-4 border-t border-slate-50">
-                   <div className="space-y-2">
-                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Minha Identidade</label>
-                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.phrase} onChange={(e) => { const updated = {...currentUser, phrase: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
-                   </div>
-                   <div className="space-y-2">
-                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Minha Missão</label>
-                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.mission} onChange={(e) => { const updated = {...currentUser, mission: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
-                   </div>
-                   <div className="space-y-2">
-                      <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest px-2">Visão 5 Anos</label>
-                      <textarea className="w-full bg-slate-50 rounded-2xl p-4 text-sm font-medium border border-slate-100 outline-none focus:border-indigo-300 min-h-[80px]" value={currentUser.vision5Years} onChange={(e) => { const updated = {...currentUser, vision5Years: e.target.value}; setCurrentUser(updated); setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p)); }} />
-                   </div>
-                </div>
-             </div>
-             <button onClick={() => { setView(ViewMode.DASHBOARD); showToast('Perfil Salvo!'); }} className="w-full bg-slate-900 text-white py-5 rounded-[32px] font-black text-sm uppercase tracking-widest shadow-xl">Salvar Perfil</button>
-          </div>
+                 </div>
+                 <button onClick={() => { setCurrentUser(null); setAuthMode('login'); }} className="w-full py-4 bg-red-50 text-red-500 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-red-100 transition-colors">Encerrar Sessão</button>
+            </div>
         )}
-      </main>
-      
-      {/* Modals */}
-      {showTaskModal && renderTaskModal()}
-      {showGoalModal && renderGoalModal()}
 
-      {/* Floating Smart Command Center */}
-      <div className="absolute bottom-28 left-0 right-0 px-6 z-50 pointer-events-none">
-        <form onSubmit={handleSmartInput} className="bg-white/95 backdrop-blur-xl border border-slate-200 shadow-2xl rounded-full flex items-center p-2 pointer-events-auto ring-8 ring-slate-50/50">
-          <input value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder={view === ViewMode.AI ? "Consulte o Mentor..." : "Determine um dever..."} className="flex-1 bg-transparent px-5 py-3 outline-none text-sm font-bold text-slate-800" />
-          <button type="submit" className="w-12 h-12 bg-slate-900 hover:bg-black text-white rounded-full flex items-center justify-center transition-all shadow-xl active:scale-90 flex-shrink-0">
-            {isAiLoading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Send size={22} />}
-          </button>
-        </form>
+      </main>
+
+      {/* Bottom Input & Nav */}
+      <div className="p-4 bg-white border-t border-slate-100 pb-8">
+         <form onSubmit={handleSmartInput} className="relative flex items-center gap-2">
+            {view !== ViewMode.DASHBOARD && (
+               <button type="button" onClick={() => setView(ViewMode.DASHBOARD)} className="p-3 bg-slate-100 text-slate-500 rounded-2xl hover:bg-slate-200 transition-colors">
+                  <LayoutDashboard size={20} />
+               </button>
+            )}
+            <div className="flex-1 relative">
+               <input 
+                  value={inputText}
+                  onChange={e => setInputText(e.target.value)}
+                  placeholder={view === ViewMode.AI ? "Converse com o Mentor..." : "Nova missão ou comando..."}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 pl-4 pr-12 outline-none focus:border-indigo-500 font-medium text-sm transition-all"
+               />
+               <button type="submit" disabled={!inputText.trim() || isAiLoading} className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-indigo-600 text-white rounded-xl disabled:opacity-50 disabled:bg-slate-300 transition-all active:scale-95 shadow-lg shadow-indigo-600/20">
+                  {isAiLoading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"/> : <Send size={16} />}
+               </button>
+            </div>
+         </form>
       </div>
 
-      {/* Premium Tab Navigation */}
-      <nav className="fixed bottom-0 max-w-md w-full bg-white/95 backdrop-blur-xl border-t border-slate-200 grid grid-cols-5 py-5 z-[60] px-3 shadow-[0_-10px_40px_rgba(0,0,0,0.08)]">
-        <NavButton active={view === ViewMode.DASHBOARD} onClick={() => { setView(ViewMode.DASHBOARD); setFilterOverdue(false); }} icon={<LayoutDashboard size={22}/>} label="Home" />
-        <NavButton active={view === ViewMode.AGENDA} onClick={() => setView(ViewMode.AGENDA)} icon={<Calendar size={22}/>} label="Agenda" />
-        <div className="flex justify-center -mt-12">
-          <button onClick={() => { setView(ViewMode.AI); setFilterOverdue(false); }} className={`w-16 h-16 rounded-[24px] shadow-2xl flex items-center justify-center transition-all ${view === ViewMode.AI ? 'bg-indigo-600 text-white scale-110 shadow-indigo-600/40 ring-4 ring-indigo-100' : 'bg-slate-900 text-white hover:bg-black ring-4 ring-white/10'}`}>
-            <Sparkles size={30} />
-          </button>
-        </div>
-        <NavButton active={view === ViewMode.GOALS} onClick={() => { setView(ViewMode.GOALS); setFilterOverdue(false); }} icon={<Target size={22}/>} label="Metas" />
-        <NavButton active={view === ViewMode.FAMILY} onClick={() => { setView(ViewMode.FAMILY); setFilterOverdue(false); }} icon={<Users size={22}/>} label="Legado" />
-      </nav>
+      {showTaskModal && renderTaskModal()}
+      {showGoalModal && renderGoalModal()}
+      {showMilestoneModal && renderMilestoneModal()}
+      {showRuleModal && renderRuleModal()}
     </div>
   );
 };
-
-const NavButton: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label: string }> = ({ active, onClick, icon, label }) => (
-  <button onClick={onClick} className={`flex flex-col items-center gap-1.5 transition-all ${active ? 'text-indigo-600' : 'text-slate-400 hover:text-indigo-400'}`}>
-    <div className={`transition-transform duration-300 ${active ? 'scale-110' : 'scale-100'}`}>{icon}</div>
-    <span className={`text-[8px] font-black uppercase tracking-tighter transition-opacity ${active ? 'opacity-100' : 'opacity-60'}`}>{label}</span>
-  </button>
-);
 
 export default App;

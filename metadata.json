@@ -3,5 +3,6 @@
   "description": "Um ecossistema completo para gestão de vida, estudos e família, focado em disciplina, ordem e crescimento de longo prazo.",
   "requestFramePermissions": [
     "microphone"
-  ]
+  ],
+  "majorCapabilities": []
 }

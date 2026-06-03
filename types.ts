@@ -41,7 +41,7 @@ export interface Task {
   title: string;
   completed: boolean;
   date: string;
-  time?: string;
+  dueTime?: string;
   pillar: PillarType;
   profileId: string;
   isFamilyTask?: boolean;

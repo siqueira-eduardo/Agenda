@@ -9,9 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^19.2.4",
-    "lucide-react": "^0.563.0",
     "@google/genai": "^1.40.0",
+    "firebase": "^12.14.0",
+    "lucide-react": "^0.563.0",
+    "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
   "devDependencies": {

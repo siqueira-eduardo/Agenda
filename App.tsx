@@ -6,10 +6,13 @@ import {
   Wallet, GraduationCap, Clock, Flame, UserPlus, 
   ShieldCheck, ListChecks, Gavel, Edit3, X, Save, Camera, 
   LogIn, UserCircle2, Key, Hash, Shield, ArrowRight, LogOut, Copy, Check, Volume2, Info, AlertCircle, Plus, CloudCheck, Settings, UsersRound, Trophy, ScrollText, UserCog, History, Filter, LayoutGrid, List, Repeat, 
-  Zap, PieChart, BarChart3, ChevronDown, Medal, Star, Crown, StopCircle, RefreshCcw, CheckCircle2
+  Zap, PieChart, BarChart3, ChevronDown, Medal, Star, Crown, StopCircle, RefreshCcw, CheckCircle2,
+  Table
 } from 'lucide-react';
 import { Task, ViewMode, AIChatMessage, PillarType, Profile, Goal, StudyEntry, FamilyRule, Family, ProfileRole, RecurrenceType, PriorityType, Milestone } from './types';
 import { getAIResponse, parseSmartTask, generateSpeech } from './services/geminiService';
+import { initAuth, googleSignIn, logout, createSpreadsheet, appendSpreadsheetRow, getSpreadsheetData, updateSpreadsheetData } from './services/googleAPI';
+import { User } from 'firebase/auth';
 
 const PILLAR_COLORS: Record<PillarType, string> = {
   'Espiritual': 'bg-purple-100 text-purple-700',
@@ -124,7 +127,7 @@ const App: React.FC = () => {
   const [taskForm, setTaskForm] = useState({
     title: '',
     date: '',
-    time: '',
+    dueTime: '',
     pillar: 'Estudos' as PillarType,
     assignee: '',
     recurrence: undefined as RecurrenceType | undefined,
@@ -156,11 +159,12 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState<string | null>(null);
   const [currentAudio, setCurrentAudio] = useState<AudioBufferSourceNode | null>(null);
   const [filterOverdue, setFilterOverdue] = useState(false);
-  const [notification, setNotification] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+  const [notification, setNotification] = useState<{msg: string, type: 'success' | 'error' | 'info'} | null>(null);
+  const [alertedTasks, setAlertedTasks] = useState<Set<string>>(new Set());
   const chatEndRef = useRef<HTMLDivElement>(null);
   
   // Data States
-  const [tasks, setTasks] = useState<Task[]>(() => { try { return JSON.parse(localStorage.getItem('legado_tasks') || '[]') } catch { return [] }});
+  const [tasks, setTasks] = useState<Task[]>(() => { try { const stored = JSON.parse(localStorage.getItem('legado_tasks') || '[]'); return stored.map((t: any) => ({ ...t, dueTime: t.dueTime || t.time })); } catch { return [] }});
   const [goals, setGoals] = useState<Goal[]>(() => { try { return JSON.parse(localStorage.getItem('legado_goals') || '[]') } catch { return [] }});
   const [rules, setRules] = useState<FamilyRule[]>(() => { try { return JSON.parse(localStorage.getItem('legado_rules') || '[]') } catch { return [] }});
   const [aiChat, setAiChat] = useState<AIChatMessage[]>([]);
@@ -168,6 +172,11 @@ const App: React.FC = () => {
   // Feedback States
   const [authError, setAuthError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
+
+  // Google Sheets integration States
+  const [needsGoogleAuth, setNeedsGoogleAuth] = useState(false);
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [isExportingSheets, setIsExportingSheets] = useState(false);
 
   // Persistence
   useEffect(() => {
@@ -189,6 +198,157 @@ const App: React.FC = () => {
       return () => clearTimeout(t);
     }
   }, [notification]);
+
+  // Approaching Tasks Timer
+  useEffect(() => {
+    const checkApproachingTasks = () => {
+      if (!currentUser || !tasks.length) return;
+      const now = new Date();
+      const todayStrLocal = formatDateLocal(now);
+      const currentTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      
+      tasks.forEach(task => {
+        if (!task.completed && task.dueTime && task.date === todayStrLocal) {
+          if (!alertedTasks.has(task.id)) {
+            const [dueH, dueM] = task.dueTime.split(':').map(Number);
+            const [nowH, nowM] = currentTimeStr.split(':').map(Number);
+            
+            const dueTotal = dueH * 60 + dueM;
+            const nowTotal = nowH * 60 + nowM;
+            
+            const diff = dueTotal - nowTotal;
+            if (diff > 0 && diff <= 15) {
+              setNotification({msg: `A tarefa "${task.title}" está se aproximando (${task.dueTime}).`, type: 'info'});
+              setAlertedTasks(prev => new Set(prev).add(task.id));
+            }
+          }
+        }
+      });
+    };
+
+    const interval = setInterval(checkApproachingTasks, 60000);
+    checkApproachingTasks();
+    return () => clearInterval(interval);
+  }, [tasks, currentUser, alertedTasks]);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setNeedsGoogleAuth(false);
+      },
+      () => {
+        setGoogleUser(null);
+        setNeedsGoogleAuth(true);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = async () => {
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setGoogleUser(result.user);
+        setNeedsGoogleAuth(false);
+        setNotification({ msg: 'Google Workspace conectado com sucesso!', type: 'success' });
+      }
+    } catch (err: any) {
+      console.error(err);
+      setNotification({ msg: err.message || 'Falha ao conectar no Google. Verifique o popup.', type: 'error' });
+    }
+  };
+
+  const handleExportToSheets = async () => {
+    if (needsGoogleAuth) {
+      await handleGoogleLogin();
+      return; 
+    }
+
+    setIsExportingSheets(true);
+    try {
+      let sheetId = localStorage.getItem('legado_db_spreadsheet_id');
+      let sheetUrl = localStorage.getItem('legado_db_spreadsheet_url');
+      
+      if (!sheetId) {
+          const sheet = await createSpreadsheet(`Legado DB - Tarefas`);
+          sheetId = sheet.spreadsheetId;
+          sheetUrl = sheet.spreadsheetUrl;
+          localStorage.setItem('legado_db_spreadsheet_id', sheetId!);
+          localStorage.setItem('legado_db_spreadsheet_url', sheetUrl!);
+      }
+      
+      const rows = [
+        ['ID', 'Título', 'Data', 'Horário', 'Prioridade', 'Pilar', 'Concluído'],
+        ...tasks.map(t => [
+          t.id,
+          t.title,
+          t.date,
+          t.dueTime || '',
+          t.priority,
+          t.pillar,
+          t.completed ? 'Sim' : 'Não'
+        ])
+      ];
+
+      // Update the whole sheet
+      await updateSpreadsheetData(sheetId!, 'Página1!A1', rows);
+      setNotification({ msg: `Planilha atualizada com sucesso!`, type: 'success' });
+    } catch (err: any) {
+      console.error(err);
+      if (err.message.includes('404')) {
+        localStorage.removeItem('legado_db_spreadsheet_id');
+        setNotification({ msg: 'Planilha não encontrada. Tente novamente para criar uma nova.', type: 'error' });
+      } else {
+        setNotification({ msg: 'Falha ao sincronizar. Tem permissões corretas?', type: 'error' });
+      }
+    } finally {
+      setIsExportingSheets(false);
+    }
+  };
+
+  const handleImportFromSheets = async () => {
+    if (needsGoogleAuth) {
+        await handleGoogleLogin();
+        return;
+    }
+    
+    const sheetId = localStorage.getItem('legado_db_spreadsheet_id');
+    if (!sheetId) {
+        setNotification({ msg: 'Nenhuma planilha vinculada ainda. Exporte primeiro.', type: 'error' });
+        return;
+    }
+    
+    setIsExportingSheets(true);
+    try {
+        const data = await getSpreadsheetData(sheetId, 'Página1!A2:G');
+        if (data.values && data.values.length > 0) {
+            const importedTasks: Task[] = data.values.map((row: any) => ({
+                id: row[0],
+                title: row[1],
+                date: row[2],
+                dueTime: row[3] || undefined,
+                priority: row[4] as PriorityType,
+                pillar: row[5] as PillarType,
+                completed: row[6] === 'Sim',
+                profileId: currentUser!.id, // simplifying assignee
+                isFamilyTask: false
+            }));
+            
+            // Merge or Replace? Let's just replace all tasks, but keep ones not belonging to user?
+            // Actually, exported ALL tasks in handleExportToSheets.
+            setTasks(importedTasks);
+            setNotification({ msg: 'Tarefas importadas com sucesso!', type: 'success' });
+        } else {
+            setNotification({ msg: 'Planilha vazia ou sem tarefas.', type: 'info' });
+        }
+    } catch (err) {
+        console.error(err);
+        setNotification({ msg: 'Erro ao importar.', type: 'error' });
+    } finally {
+        setIsExportingSheets(false);
+    }
+  };
 
   // Scroll Chat
   useEffect(() => {
@@ -270,9 +430,9 @@ const App: React.FC = () => {
       const prioMap = { 'Alta': 0, 'Média': 1, 'Baixa': 2 };
       if (prioMap[a.priority] !== prioMap[b.priority]) return prioMap[a.priority] - prioMap[b.priority];
       
-      if (a.time && b.time) return a.time.localeCompare(b.time);
-      if (a.time && !b.time) return -1;
-      if (!a.time && b.time) return 1;
+      if (a.dueTime && b.dueTime) return a.dueTime.localeCompare(b.dueTime);
+      if (a.dueTime && !b.dueTime) return -1;
+      if (!a.dueTime && b.dueTime) return 1;
 
       return a.title.localeCompare(b.title);
     });
@@ -457,7 +617,7 @@ const App: React.FC = () => {
       setTaskForm({
         title: task.title,
         date: task.date,
-        time: task.time || '',
+        dueTime: task.dueTime || '',
         pillar: task.pillar,
         assignee: task.profileId,
         recurrence: task.recurrence,
@@ -487,7 +647,7 @@ const App: React.FC = () => {
         ...t, 
         title: taskForm.title,
         date: taskForm.date,
-        time: taskForm.time,
+        dueTime: taskForm.dueTime,
         pillar: taskForm.pillar,
         profileId: taskForm.assignee,
         recurrence: taskForm.recurrence,
@@ -501,7 +661,7 @@ const App: React.FC = () => {
         title: taskForm.title,
         completed: false,
         date: taskForm.date,
-        time: taskForm.time,
+        dueTime: taskForm.dueTime,
         pillar: taskForm.pillar,
         profileId: taskForm.assignee,
         isFamilyTask: false,
@@ -725,8 +885,8 @@ const App: React.FC = () => {
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest pl-2 mb-1 block">Horário</label>
                 <input 
                   type="time"
-                  value={taskForm.time}
-                  onChange={e => setTaskForm({...taskForm, time: e.target.value})}
+                  value={taskForm.dueTime}
+                  onChange={e => setTaskForm({...taskForm, dueTime: e.target.value})}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 outline-none focus:border-indigo-500 font-bold text-xs text-slate-800"
                 />
              </div>
@@ -864,12 +1024,30 @@ const App: React.FC = () => {
             <button onClick={() => setAgendaType('daily')} className={`px-4 py-2 rounded-[12px] text-[10px] font-black uppercase transition-all flex items-center gap-2 ${agendaType === 'daily' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><List size={14}/> Diário</button>
             <button onClick={() => setAgendaType('monthly')} className={`px-4 py-2 rounded-[12px] text-[10px] font-black uppercase transition-all flex items-center gap-2 ${agendaType === 'monthly' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}><LayoutGrid size={14}/> Mensal</button>
           </div>
-          <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value as any)} className="bg-white border border-slate-100 rounded-xl px-3 py-2 text-[10px] font-black uppercase text-slate-500 outline-none shadow-sm">
-            <option value="all">Tudo</option>
-            <option value="Estudos">Estudos</option>
-            <option value="Trabalho">Trabalho</option>
-            <option value="Família">Rotina</option>
-          </select>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={handleExportToSheets} 
+              disabled={isExportingSheets}
+              className={`p-2 rounded-xl text-white transition-colors flex items-center gap-1 ${needsGoogleAuth ? 'bg-amber-500 hover:bg-amber-600' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+              title={needsGoogleAuth ? 'Conectar Google Sheets' : 'Sincronizar para o Sheets'}
+            >
+              <Zap size={14} /> 
+            </button>
+            <button 
+              onClick={handleImportFromSheets} 
+              disabled={isExportingSheets}
+              className={`p-2 rounded-xl text-white transition-colors flex items-center gap-1 ${needsGoogleAuth ? 'bg-slate-300' : 'bg-blue-500 hover:bg-blue-600'}`}
+              title="Importar do Sheets"
+            >
+              <Table size={14} /> 
+            </button>
+            <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value as any)} className="bg-white border border-slate-100 rounded-xl px-3 py-2 text-[10px] font-black uppercase text-slate-500 outline-none shadow-sm">
+              <option value="all">Tudo</option>
+              <option value="Estudos">Estudos</option>
+              <option value="Trabalho">Trabalho</option>
+              <option value="Família">Rotina</option>
+            </select>
+          </div>
         </div>
         {isAdmin && agendaType === 'monthly' && (
           <div className="flex items-center gap-3 bg-white p-4 rounded-[24px] border border-slate-100 shadow-sm group hover:border-indigo-200 transition-all">
@@ -928,8 +1106,8 @@ const App: React.FC = () => {
     return (
       <div className="max-w-md mx-auto h-screen bg-slate-900 flex flex-col p-8 text-white relative overflow-hidden">
         {notification && (
-            <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : 'bg-red-500/90 border-red-400 text-white'}`}>
-                {notification.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+            <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : notification.type === 'error' ? 'bg-red-500/90 border-red-400 text-white' : 'bg-amber-500/90 border-amber-400 text-amber-900'}`}>
+                {notification.type === 'success' ? <Check size={16} /> : notification.type === 'error' ? <AlertCircle size={16} /> : <Clock size={16} />}
                 <span className="flex-1">{notification.msg}</span>
                 <button onClick={() => setNotification(null)} className="hover:bg-white/20 p-1 rounded-full transition-colors"><X size={14} /></button>
             </div>
@@ -1005,8 +1183,8 @@ const App: React.FC = () => {
       
       {/* Improved Notification Toast */}
       {notification && (
-        <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : 'bg-red-500/90 border-red-400 text-white'}`}>
-            {notification.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 w-[90%] p-4 rounded-2xl shadow-xl z-[100] font-bold text-xs flex items-center gap-3 backdrop-blur-md border animate-slideDown ${notification.type === 'success' ? 'bg-emerald-500/90 border-emerald-400 text-white' : notification.type === 'error' ? 'bg-red-500/90 border-red-400 text-white' : 'bg-amber-500/90 border-amber-400 text-amber-900'}`}>
+            {notification.type === 'success' ? <Check size={16} /> : notification.type === 'error' ? <AlertCircle size={16} /> : <Clock size={16} />}
             <span className="flex-1">{notification.msg}</span>
             <button onClick={() => setNotification(null)} className="hover:bg-white/20 p-1 rounded-full transition-colors"><X size={14} /></button>
         </div>
@@ -1117,13 +1295,13 @@ const App: React.FC = () => {
                ) : (
                  <div className="space-y-3">
                     <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 w-full">
-                       {Object.entries(dashboardData.pillarCounts).map(([pillar, count]) => ( <div key={pillar} style={{ width: `${(count / dashboardData.total) * 100}%` }} className={PILLAR_BG[pillar as PillarType]} />))}
+                       {Object.entries(dashboardData.pillarCounts).map(([pillar, count]) => ( <div key={pillar} style={{ width: `${((count as number) / dashboardData.total) * 100}%` }} className={PILLAR_BG[pillar as PillarType]} />))}
                     </div>
                     <div className="flex flex-wrap gap-3 mt-2">
                        {Object.entries(dashboardData.pillarCounts).map(([pillar, count]) => (
                           <div key={pillar} className="flex items-center gap-1.5">
                              <div className={`w-2 h-2 rounded-full ${PILLAR_BG[pillar as PillarType]}`} />
-                             <span className="text-[9px] font-bold text-slate-600 uppercase">{pillar} ({count})</span>
+                             <span className="text-[9px] font-bold text-slate-600 uppercase">{pillar} ({count as number})</span>
                           </div>
                        ))}
                     </div>
@@ -1172,7 +1350,7 @@ const App: React.FC = () => {
                         <div className="flex items-center flex-wrap gap-2 mt-1">
                           <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full ${PILLAR_COLORS[t.pillar]}`}>{t.pillar}</span>
                           <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full border ${PRIORITY_COLORS[t.priority]}`}>{t.priority}</span>
-                          {t.time && <span className="text-[9px] font-black text-slate-400 flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 rounded"><Clock size={10}/> {t.time}</span>}
+                          {t.dueTime && <span className="text-[9px] font-black text-slate-400 flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 rounded"><Clock size={10}/> {t.dueTime}</span>}
                           {t.recurrence && <span className="text-[9px] font-black text-indigo-500 flex items-center gap-1"><Repeat size={10}/> {t.recurrence}</span>}
                         </div>
                       </div>

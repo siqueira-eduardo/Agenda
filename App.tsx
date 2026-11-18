@@ -12,6 +12,7 @@ import {
 import { Task, ViewMode, AIChatMessage, PillarType, Profile, Goal, StudyEntry, FamilyRule, Family, ProfileRole, RecurrenceType, PriorityType, Milestone } from './types';
 import { getAIResponse, parseSmartTask, generateSpeech } from './services/geminiService';
 import { initAuth, googleSignIn, logout, createSpreadsheet, appendSpreadsheetRow, getSpreadsheetData, updateSpreadsheetData } from './services/googleAPI';
+import { hashPassword, verifyPassword } from './services/passwordService';
 import { User } from 'firebase/auth';
 
 const PILLAR_COLORS: Record<PillarType, string> = {
@@ -495,11 +496,29 @@ const App: React.FC = () => {
   }, [calendarDate, selectedMemberId, tasks, categoryFilter, familyMembers]);
 
   // --- Handlers ---
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const { email, password } = e.currentTarget as any;
-    const found = allProfiles.find(p => p.email === email.value && p.password === password.value);
-    if (found) {
+    const candidate = allProfiles.find(p => p.email === email.value);
+    let check = { ok: false, legacy: false };
+    try {
+      if (candidate) check = await verifyPassword(password.value, candidate.password);
+    } catch (err: any) {
+      setAuthError(err.message || 'Não foi possível verificar a senha.');
+      return;
+    }
+
+    if (candidate && check.ok) {
+      let found = candidate;
+      if (check.legacy) {
+        // Conta antiga com senha em texto puro: regrava já com hash.
+        try {
+          found = { ...candidate, password: await hashPassword(password.value) };
+          setAllProfiles(prev => prev.map(p => (p.id === found.id ? found : p)));
+        } catch {
+          // Sem Web Crypto, mantém a conta como está e permite o acesso.
+        }
+      }
       setCurrentUser(found);
       setSelectedMemberId(found.id);
       setAuthMode(found.familyId ? 'login' : 'family-choice');
@@ -510,18 +529,25 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSignup = (e: React.FormEvent) => {
+  const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     const { name, email, password } = e.currentTarget as any;
     if (allProfiles.some(p => p.email === email.value)) {
       setAuthError("E-mail já está sendo usado.");
       return;
     }
+    let passwordHash: string;
+    try {
+      passwordHash = await hashPassword(password.value);
+    } catch (err: any) {
+      setAuthError(err.message || 'Não foi possível proteger a senha.');
+      return;
+    }
     const newProfile: Profile = {
       id: Date.now().toString(),
       name: name.value,
       email: email.value,
-      password: password.value,
+      password: passwordHash,
       role: 'Outro',
       familyId: '',
       phrase: 'Foco no progresso.',

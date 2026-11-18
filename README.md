@@ -60,6 +60,7 @@ Requisitos: Node.js e npm.
 
 ## Configuração e segurança
 
+- Contas e dados do app ficam no `localStorage` do navegador. As senhas são guardadas com hash (PBKDF2), mas isso não substitui um servidor de autenticação; contas antigas em texto puro são convertidas no primeiro login.
 - Nunca publique chaves privadas, tokens OAuth, credenciais de serviço ou arquivos de ambiente com segredos.
 - A configuração cliente do Firebase não substitui regras de segurança no Firebase.
 - Revise as permissões OAuth solicitadas pela integração com Google Sheets.

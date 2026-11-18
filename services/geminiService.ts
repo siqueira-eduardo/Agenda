@@ -2,6 +2,13 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Task, Goal, Profile } from "../types";
 
+// Data de hoje no fuso local (YYYY-MM-DD). toISOString() usa UTC e, no Brasil,
+// devolve o dia seguinte depois das 21h.
+const todayLocal = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const decodeBase64 = (base64: string) => {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -56,6 +63,8 @@ export const generateSpeech = async (text: string) => {
     const source = audioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(audioContext.destination);
+    // Libera o contexto de áudio quando a fala termina.
+    source.onended = () => { audioContext.close().catch(() => {}); };
     return source;
   } catch (error) {
     console.error("TTS Error:", error);
@@ -102,7 +111,7 @@ export const parseSmartTask = async (input: string) => {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Extraia título, data (YYYY-MM-DD, hoje é ${new Date().toISOString().split('T')[0]}), pilar (Espiritual, Estudos, Trabalho, Saúde, Intelectual, Financeiro, Família) e prioridade (Alta, Média, Baixa) desta entrada: "${input}". Se urgente, prioridade Alta.`,
+      contents: `Extraia título, data (YYYY-MM-DD, hoje é ${todayLocal()}), pilar (Espiritual, Estudos, Trabalho, Saúde, Intelectual, Financeiro, Família) e prioridade (Alta, Média, Baixa) desta entrada: "${input}". Se urgente, prioridade Alta.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {

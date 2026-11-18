@@ -584,11 +584,9 @@ const App: React.FC = () => {
     e.preventDefault();
     const { code } = e.currentTarget as any;
     const cleanCode = code.value.trim().toUpperCase();
-    let fam = families.find(f => f.uniqueCode === cleanCode);
-    if (!fam && cleanCode.startsWith('LEG-')) {
-      fam = { id: 'fam-' + Date.now().toString(), name: 'Legado Novo', uniqueCode: cleanCode };
-      setFamilies([...families, fam]);
-    }
+    // Só entra em famílias que existem neste navegador; um código qualquer
+    // não cria mais uma família nova.
+    const fam = families.find(f => f.uniqueCode === cleanCode);
     if (fam && currentUser) {
       const updated = { ...currentUser, familyId: fam.id };
       setAllProfiles(allProfiles.map(p => p.id === currentUser.id ? updated : p));
@@ -596,7 +594,7 @@ const App: React.FC = () => {
       setView(ViewMode.DASHBOARD);
       showToast('Você ingressou no Legado!');
     } else {
-      setAuthError("Código inválido.");
+      setAuthError("Código não encontrado neste dispositivo.");
     }
   };
 
